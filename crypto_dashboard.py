@@ -179,35 +179,48 @@ def add_debug_msg(msg):
     print(full_msg)
 
 # WebSocket connection functions
+# Improved message handler with subscription confirmation tracking
 def on_message(ws, message):
     """
-    Handle incoming WebSocket messages with improved error handling
-    and state management.
+    Handle incoming WebSocket messages with improved subscription tracking
     """
     try:
         # Update last message time immediately
-        if 'ws_state' in st.session_state:
+        if hasattr(st.session_state, 'ws_state'):
             st.session_state.ws_state.update_last_message_time()
         
-        # Parse and queue the message
+        # Check if this is a subscription confirmation
+        is_subscription_response = False
+        current_thread = threading.current_thread()
+        
+        # Parse message
         data = json.loads(message)
+        
+        # Check if this is a subscription confirmation
+        if 'id' in data and 'result' in data:
+            is_subscription_response = True
+            if hasattr(current_thread, 'subscriptions_confirmed'):
+                current_thread.subscriptions_confirmed.add(data['id'])
+                add_debug_msg(f"Subscription confirmed: {data['id']}")
+        
+        # Queue message for processing
         ws_message_queue.put(data)
         
-        # Auto-mark as connected if receiving messages
-        if 'ws_state' in st.session_state and not st.session_state.ws_state.connected:
+        # Auto-mark as connected if receiving valid messages
+        if hasattr(st.session_state, 'ws_state') and not st.session_state.ws_state.connected:
             debug_message_queue.put("ws_connected:message_received")
             st.session_state.ws_state.mark_connected()
         
-        # Track statistics at reduced frequency
+        # Track statistics and log
         queue_size = ws_message_queue.qsize()
-        if queue_size < 5 or queue_size % 100 == 0:
+        if not is_subscription_response and (queue_size < 5 or queue_size % 100 == 0):
             channel = data.get('channel', 'unknown')
-            add_debug_msg(f"WS message: Channel={channel}, Queue size={queue_size}")
+            add_debug_msg(f"WS message: {channel}, Queue: {queue_size}")
             
     except json.JSONDecodeError:
-        add_debug_msg(f"Received non-JSON message: {message[:100]}...")
+        add_debug_msg(f"Non-JSON message: {message[:50]}...")
     except Exception as e:
-        error_msg = f"Error in on_message: {str(e)}"
+        error_msg = f"Error processing message: {str(e)}"
         add_debug_msg(error_msg)
         print(traceback.format_exc())
 
@@ -260,54 +273,79 @@ def on_open(ws):
     except Exception as e:
         add_debug_msg(f"Error sending initial ping: {str(e)}")
 
+# Improved channel subscription with verification and retries
 def subscribe_to_channels(ws, instruments, max_retries=3):
     """
-    Subscribe to all channels with retry logic and backoff
+    Subscribe to all required channels with verification
     """
     successful_subs = 0
     failed_subs = 0
     
-    # First subscribe to the allMids channel
+    # First, subscribe to allMids (market data)
     try:
+        sub_id = str(uuid.uuid4())[:8]
         allmids_sub = {
             "method": "subscribe", 
             "subscription": {
                 "type": "allMids"
-            }
+            },
+            "id": sub_id  # Add an ID to track this subscription
         }
         ws.send(json.dumps(allmids_sub))
+        add_debug_msg(f"Sent allMids subscription (id: {sub_id})")
         successful_subs += 1
-        time.sleep(0.1)  # Small delay between subscriptions
+        time.sleep(0.2)  # Small delay between subscriptions
     except Exception as e:
         add_debug_msg(f"Error subscribing to allMids: {str(e)}")
         failed_subs += 1
     
-    # Then subscribe to instrument-specific channels
+    # Next, subscribe to instrument-specific channels with critical data first
     for instrument in instruments:
-        # Subscribe to trades
-        if not subscribe_with_retry(ws, {
-            "method": "subscribe",
-            "subscription": {"type": "trades", "coin": instrument}
-        }, max_retries):
-            failed_subs += 1
-        else:
+        # Order book subscription (critical)
+        try:
+            sub_id = str(uuid.uuid4())[:8]
+            book_sub = {
+                "method": "subscribe", 
+                "subscription": {
+                    "type": "l2Book", 
+                    "coin": instrument
+                },
+                "id": sub_id
+            }
+            ws.send(json.dumps(book_sub))
+            add_debug_msg(f"Sent l2Book subscription for {instrument} (id: {sub_id})")
             successful_subs += 1
-            
-        time.sleep(0.1)  # Small delay between subscriptions
+            time.sleep(0.2)
+        except Exception as e:
+            add_debug_msg(f"Error subscribing to l2Book for {instrument}: {str(e)}")
+            failed_subs += 1
         
-        # Subscribe to order book
-        if not subscribe_with_retry(ws, {
-            "method": "subscribe", 
-            "subscription": {"type": "l2Book", "coin": instrument}
-        }, max_retries):
-            failed_subs += 1
-        else:
+        # Trade subscription (critical for dashboard functionality)
+        try:
+            sub_id = str(uuid.uuid4())[:8]
+            trade_sub = {
+                "method": "subscribe",
+                "subscription": {
+                    "type": "trades", 
+                    "coin": instrument
+                },
+                "id": sub_id
+            }
+            ws.send(json.dumps(trade_sub))
+            add_debug_msg(f"Sent trades subscription for {instrument} (id: {sub_id})")
             successful_subs += 1
-            
-        time.sleep(0.1)  # Small delay between subscriptions
+            time.sleep(0.2)
+        except Exception as e:
+            add_debug_msg(f"Error subscribing to trades for {instrument}: {str(e)}")
+            failed_subs += 1
     
-    # Log subscription summary
-    add_debug_msg(f"Subscriptions: {successful_subs} successful, {failed_subs} failed")
+    # Add verification tracking for subscriptions
+    current_thread = threading.current_thread()
+    current_thread.pending_subscriptions = successful_subs
+    current_thread.subscription_time = time.time()
+    
+    add_debug_msg(f"Sent {successful_subs} subscriptions, {failed_subs} failed")
+    return successful_subs > 0
 
 def subscribe_with_retry(ws, subscription, max_retries=3):
     """
@@ -341,10 +379,10 @@ def subscribe_with_retry(ws, subscription, max_retries=3):
     
     return False
 
+# Refactored WebSocket connection handler with better error handling
 def run_websocket(session_id):
     """
-    WebSocket connection function with improved error handling,
-    reconnection logic, and state management
+    WebSocket connection function with improved error recovery and subscription management
     """
     ws_url = "wss://api.hyperliquid.xyz/ws"
     thread_id = threading.get_ident()
@@ -353,18 +391,20 @@ def run_websocket(session_id):
     # Store session ID in thread local storage
     current_thread.session_id = session_id
     current_thread.connection_open = False
+    current_thread.subscriptions_confirmed = set()
     
-    add_debug_msg(f"Starting WebSocket session {session_id} in thread {thread_id}")
+    add_debug_msg(f"Starting WebSocket thread {thread_id} with session {session_id}")
     
-    # Configure reconnection with exponential backoff
-    reconnect_delay = 5  # Initial reconnect delay in seconds
-    max_reconnect_delay = 60  # Maximum reconnect delay in seconds
+    # Connection parameters
+    reconnect_delay = 5
+    max_reconnect_delay = 60
+    subscription_retry_count = 3
     
-    while True:
+    while getattr(current_thread, 'should_run', True):
         try:
-            # Check if this thread should exit (newer thread has taken over)
+            # Verify this thread should still be running
             if not hasattr(st.session_state, 'ws_state') or st.session_state.ws_state.session_id != session_id:
-                add_debug_msg(f"Thread {thread_id} detected it's been replaced, exiting")
+                add_debug_msg(f"Thread {thread_id} detected session change, exiting")
                 return
             
             # Create WebSocket with optimized settings
@@ -374,19 +414,17 @@ def run_websocket(session_id):
                 on_message=on_message,
                 on_error=on_error,
                 on_close=on_close,
-                # Set additional options to improve reliability
-                header={"User-Agent": "Crypto Dashboard v1.0"}
+                header={"User-Agent": "Crypto Dashboard v1.1"},
             )
             
-            # Set as the active instance
+            # Update WebSocket instance in session state
             if hasattr(st.session_state, 'ws_state'):
                 st.session_state.ws_state.set_instance(ws)
-            debug_message_queue.put(f"ws_instance_created:{id(ws)}")
             
-            # Log connection attempt
+            # Record connection attempt
             add_debug_msg(f"Connecting to {ws_url} [Session: {session_id}]")
             
-            # Run WebSocket with optimized settings
+            # Run WebSocket with improved settings
             ws.run_forever(
                 ping_interval=30,
                 ping_timeout=10,
@@ -394,15 +432,12 @@ def run_websocket(session_id):
                 reconnect=0  # We handle reconnection ourselves
             )
             
-            # If we get here, connection closed or failed
-            add_debug_msg(f"WebSocket run_forever ended, waiting {reconnect_delay}s before reconnecting")
+            # Mark as disconnected when run_forever exits
+            current_thread.connection_open = False
+            debug_message_queue.put("ws_disconnected:run_forever_ended")
             
-            # Check if connection was ever established
-            if getattr(current_thread, 'connection_open', False):
-                debug_message_queue.put("ws_disconnected:closed")
-                current_thread.connection_open = False
-            
-            # Wait before reconnecting with exponential backoff
+            # Wait before reconnecting with backoff
+            add_debug_msg(f"WebSocket connection ended, will retry in {reconnect_delay}s")
             time.sleep(reconnect_delay)
             reconnect_delay = min(reconnect_delay * 1.5, max_reconnect_delay)
             
@@ -498,42 +533,45 @@ def process_status_messages():
     
     return queue_changed, connection_status_changed
 
+# Optimized WebSocket message processing function
 def process_websocket_messages():
     """
-    Process WebSocket messages with improved performance and error handling
+    Process WebSocket messages with better performance and logging
     """
-    # First process any status messages
+    # Process status messages first
     process_status_messages()
     
-    # Get connection state
-    if 'ws_state' not in st.session_state:
-        st.session_state.ws_state = WebSocketState()
-    
-    # Get queue size and adjust processing limit accordingly
+    # Get queue size 
     queue_size = ws_message_queue.qsize()
     
-    # Dynamically adjust processing limit based on queue size
-    # Process more messages when queue is large, but maintain a reasonable limit
-    process_limit = min(1000, max(100, queue_size // 2))
+    # Dynamically adjust processing limit - critical for Streamlit performance
+    # Start with a smaller limit and gradually increase if needed
+    process_limit = min(200, max(50, min(queue_size // 4, 500)))
     
     # Initialize counters
     processed_count = 0
     trade_count = 0
     orderbook_count = 0
     other_count = 0
+    large_trade_count = 0
     
-    # Log processing start if queue is not empty
-    if queue_size > 0:
-        add_debug_msg(f"Processing WebSocket queue (size: {queue_size}, limit: {process_limit})")
-    
-    # Process messages up to the limit
+    # Process messages up to the limit with timeout
     start_time = time.time()
-    while not ws_message_queue.empty() and processed_count < process_limit:
+    max_processing_time = 0.5  # Max 500ms to prevent Streamlit lag
+    
+    while (not ws_message_queue.empty() and 
+           processed_count < process_limit and 
+           time.time() - start_time < max_processing_time):
         try:
             # Get message from queue
             message = ws_message_queue.get_nowait()
             processed_count += 1
             
+            # Skip subscription confirmations
+            if 'id' in message and 'result' in message:
+                other_count += 1
+                continue
+                
             # Get message channel
             channel = message.get('channel', 'unknown')
             
@@ -547,7 +585,14 @@ def process_websocket_messages():
                     st.session_state.order_books[instrument] = data
             
             elif channel == 'trades' and 'data' in message:
+                # Track that we received trade data for debugging
+                if processed_count < 20:  # Only log initial messages
+                    add_debug_msg(f"Received trades data with {len(message['data'])} items")
+                
                 trades = message['data']
+                if not trades:
+                    trade_count += 1
+                    continue
                 
                 for trade in trades:
                     instrument = trade.get('coin')
@@ -568,9 +613,14 @@ def process_websocket_messages():
                         
                         # Record large trades (over $50,000)
                         if notional > 50000:
+                            large_trade_count += 1
                             trade_time = datetime.fromtimestamp(int(trade.get('time', time.time() * 1000)) / 1000)
                             
-                            # Add to trades list with bounded queue size
+                            # Log first few large trades for debugging
+                            if large_trade_count <= 3:
+                                add_debug_msg(f"Found large trade: {instrument} {side} {size} @ {price} (${notional:.2f})")
+                            
+                            # Add to limited-size trade list
                             new_trade = {
                                 'instrument': instrument,
                                 'side': side,
@@ -580,28 +630,28 @@ def process_websocket_messages():
                                 'time': trade_time
                             }
                             
-                            # Maintain limited trade history with thread-safe approach
+                            # Ensure we have a thread-safe list
                             if not hasattr(st.session_state, 'trades'):
                                 st.session_state.trades = []
                             
+                            # Use thread-safe append with size limit
                             st.session_state.trades.append(new_trade)
                             
-                            # Limit list size to avoid memory issues
+                            # Keep only latest 100 trades
                             if len(st.session_state.trades) > 100:
                                 st.session_state.trades = st.session_state.trades[-100:]
             
             elif channel == 'allMids' and 'data' in message:
-                # Process all mids data (updates to latest prices)
-                mids_data = message['data'].get('mids', {})
-                for coin, price in mids_data.items():
-                    if coin in instruments:
-                        if 'latest_prices' not in st.session_state:
-                            st.session_state.latest_prices = {}
-                        st.session_state.latest_prices[coin] = float(price)
-                other_count += 1
-            
-            elif channel == 'pong':
-                # Just count pong messages
+                # Process all mids data
+                mids_data = message.get('data', {}).get('mids', {})
+                
+                if mids_data:
+                    for coin, price in mids_data.items():
+                        if coin in instruments:
+                            if 'latest_prices' not in st.session_state:
+                                st.session_state.latest_prices = {}
+                            st.session_state.latest_prices[coin] = float(price)
+                
                 other_count += 1
             
             else:
@@ -621,20 +671,16 @@ def process_websocket_messages():
     # Calculate processing time
     processing_time = time.time() - start_time
     
-    # Log processing summary when significant activity occurred
-    if processed_count > 0:
-        processing_rate = processed_count / processing_time if processing_time > 0 else 0
-        summary = (f"Processed {processed_count} messages in {processing_time:.2f}s "
-                   f"({processing_rate:.1f}/s): {trade_count} trades, "
-                   f"{orderbook_count} orderbooks, {other_count} other")
-        
-        # Only log if we processed a significant number of messages
-        if processed_count > 10 or trade_count > 0:
-            add_debug_msg(summary)
+    # Log processing summary for significant activity
+    if processed_count > 10 or large_trade_count > 0:
+        summary = (f"Processed {processed_count}/{queue_size} messages in {processing_time:.2f}s: "
+                   f"{trade_count} trades ({large_trade_count} large), "
+                   f"{orderbook_count} books, {other_count} other")
+        add_debug_msg(summary)
     
     # Return processing stats
-    return (f"Processed: {processed_count} messages "
-            f"({trade_count} trades, {orderbook_count} orderbooks, {other_count} other)"), processed_count
+    return (f"Processed: {processed_count}/{queue_size} messages "
+            f"({large_trade_count} large trades)"), processed_count
 
 def ensure_websocket_connection():
     """

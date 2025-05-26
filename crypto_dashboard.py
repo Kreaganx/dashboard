@@ -1163,72 +1163,72 @@ with tab1:
                     ask_df['total'] = ask_df['px'] * ask_df['sz']
                     ask_df = ask_df.sort_values('px', ascending=True)  # Lowest ask first
                     
-                    # Display header
-                    st.subheader(f"{instrument} Order Book")
-                    
-                    # Quick stats row
-                    col1, col2, col3, col4 = st.columns(4)
-                    col1.metric("Best Bid", f"${top_bid:.4f}")
-                    col2.metric("Best Ask", f"${top_ask:.4f}")
-                    col3.metric("Spread", f"{spread_bps:.2f} bps")
-                    col4.metric("Mid Price", f"${mid_price:.4f}")
-                    
-                    # Create styled order book using streamlit dataframes with color coding
-                    st.markdown("**Asks (Sells)**")
-                    
-                    # Style asks with red background gradient
-                    ask_display = ask_df.copy()
-                    ask_display.columns = ['Price', 'Size', 'Orders', 'Total']
-                    ask_display = ask_display[['Price', 'Size', 'Total']].iloc[::-1]  # Reverse to show highest first
-                    
-                    # Display asks
-                    st.dataframe(
-                        ask_display.style.background_gradient(
-                            subset=['Size'], 
-                            cmap='Reds', 
-                            vmin=0, 
-                            vmax=ask_display['Size'].max()
-                        ).format({
-                            'Price': '${:.4f}',
-                            'Size': '{:.1f}',
-                            'Total': '${:.0f}'
-                        }),
-                        use_container_width=True
-                    )
-                    
-                    # Spread display
+                    # Compact header with all info in one line
                     st.markdown(f"""
-                    <div style='text-align: center; padding: 10px; background-color: #2d3748; 
-                                border-radius: 5px; margin: 10px 0; color: #fbbf24;'>
-                        <strong>Spread: ${spread:.4f} ({spread_bps:.2f} bps) | Mid: ${mid_price:.4f}</strong>
+                    <div style='background: #1f2937; padding: 8px 15px; border-radius: 6px; margin: 5px 0;
+                                display: flex; justify-content: space-between; align-items: center;'>
+                        <h4 style='color: #f3f4f6; margin: 0; font-size: 1.1em;'>{instrument}</h4>
+                        <div style='color: #9ca3af; font-size: 0.9em;'>
+                            <span style='color: #22c55e;'>Bid: ${top_bid:.4f}</span> | 
+                            <span style='color: #ef4444;'>Ask: ${top_ask:.4f}</span> | 
+                            <span style='color: #f59e0b;'>Spread: {spread_bps:.2f}bps</span> | 
+                            <span style='color: #8b5cf6;'>Mid: ${mid_price:.4f}</span>
+                        </div>
                     </div>
                     """, unsafe_allow_html=True)
                     
-                    st.markdown("**Bids (Buys)**")
+                    # Create styled order book using streamlit dataframes with color coding
+                    col1, col2 = st.columns([1, 1])
                     
-                    # Style bids with green background gradient
-                    bid_display = bid_df.copy()
-                    bid_display.columns = ['Price', 'Size', 'Orders', 'Total']
-                    bid_display = bid_display[['Price', 'Size', 'Total']]
+                    with col1:
+                        st.markdown("**Asks (Sells)**")
+                        
+                        # Style asks with red background gradient
+                        ask_display = ask_df.copy()
+                        ask_display.columns = ['Price', 'Size', 'Orders', 'Total']
+                        ask_display = ask_display[['Price', 'Size', 'Total']].iloc[::-1]  # Reverse to show highest first
+                        
+                        # Display asks
+                        st.dataframe(
+                            ask_display.style.background_gradient(
+                                subset=['Size'], 
+                                cmap='Reds', 
+                                vmin=0, 
+                                vmax=ask_display['Size'].max()
+                            ).format({
+                                'Price': '${:.4f}',
+                                'Size': '{:.1f}',
+                                'Total': '${:.0f}'
+                            }),
+                            use_container_width=True,
+                            height=200
+                        )
                     
-                    # Display bids
-                    st.dataframe(
-                        bid_display.style.background_gradient(
-                            subset=['Size'], 
-                            cmap='Greens', 
-                            vmin=0, 
-                            vmax=bid_display['Size'].max()
-                        ).format({
-                            'Price': '${:.4f}',
-                            'Size': '{:.1f}',
-                            'Total': '${:.0f}'
-                        }),
-                        use_container_width=True
-                    )
+                    with col2:
+                        st.markdown("**Bids (Buys)**")
+                        
+                        # Style bids with green background gradient
+                        bid_display = bid_df.copy()
+                        bid_display.columns = ['Price', 'Size', 'Orders', 'Total']
+                        bid_display = bid_display[['Price', 'Size', 'Total']]
+                        
+                        # Display bids
+                        st.dataframe(
+                            bid_display.style.background_gradient(
+                                subset=['Size'], 
+                                cmap='Greens', 
+                                vmin=0, 
+                                vmax=bid_display['Size'].max()
+                            ).format({
+                                'Price': '${:.4f}',
+                                'Size': '{:.1f}',
+                                'Total': '${:.0f}'
+                            }),
+                            use_container_width=True,
+                            height=200
+                        )
                     
-                    # Bar chart visualization (back to the original style)
-                    st.subheader("Order Book Depth")
-                    
+                    # Compact bar chart visualization
                     fig = go.Figure()
                     
                     # Add asks (red bars)
@@ -1257,13 +1257,14 @@ with tab1:
                     )
                     
                     fig.update_layout(
-                        title=f"{instrument} Order Book Depth",
+                        title=None,  # Remove title to save space
                         xaxis_title="Price",
                         yaxis_title="Size",
                         barmode='group',
-                        height=400,
+                        height=250,  # Smaller height
                         template="plotly_dark",
-                        showlegend=True
+                        showlegend=False,  # Remove legend to save space
+                        margin=dict(l=0, r=0, t=20, b=0)
                     )
                     
                     st.plotly_chart(fig, use_container_width=True)

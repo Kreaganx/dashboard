@@ -359,44 +359,77 @@ async def connect_websocket_async(instruments, ws_state):
         ws_state.mark_disconnected()
 
 def test_simple_websocket():
-    """Simple WebSocket test that should work"""
-    add_debug_msg("Starting simple WebSocket test...")
+    """Simple WebSocket test with enhanced debugging"""
+    add_debug_msg("Starting enhanced simple WebSocket test...")
     
     def simple_ws_test():
         try:
             import websocket
             
+            # Enable WebSocket debugging
+            websocket.enableTrace(True)
+            
+            message_count = 0
+            
             def on_message(ws, message):
-                add_debug_msg(f"Simple test received: {message[:100]}")
+                nonlocal message_count
+                message_count += 1
+                add_debug_msg(f"Simple test message {message_count}: {message[:150]}")
+                
                 try:
                     if message != "Websocket connection established.":
                         data = json.loads(message)
                         ws_message_queue.put(data, block=False)
-                        add_debug_msg("Simple test: Queued message")
-                except:
-                    pass
+                        add_debug_msg(f"Simple test: Queued message {message_count}")
+                        
+                        # Mark connection as active when we receive data
+                        if 'ws_state' in st.session_state:
+                            st.session_state.ws_state.mark_connected("simple-test")
+                except Exception as e:
+                    add_debug_msg(f"Simple test: Error processing message: {str(e)}")
             
             def on_open(ws):
-                add_debug_msg("Simple test WebSocket opened!")
-                # Send subscription
-                ws.send(json.dumps({
-                    "method": "subscribe",
-                    "subscription": {"type": "allMids"}
-                }))
-                add_debug_msg("Simple test: Sent allMids subscription")
+                add_debug_msg("🎉 Simple test WebSocket opened successfully!")
                 
-                # Send BTC trades subscription
-                ws.send(json.dumps({
-                    "method": "subscribe", 
-                    "subscription": {"type": "trades", "coin": "BTC"}
-                }))
-                add_debug_msg("Simple test: Sent BTC trades subscription")
+                try:
+                    # Send allMids subscription
+                    allmids_sub = {
+                        "method": "subscribe",
+                        "subscription": {"type": "allMids"}
+                    }
+                    ws.send(json.dumps(allmids_sub))
+                    add_debug_msg("✅ Simple test: Sent allMids subscription")
+                    
+                    # Send trades subscriptions for all instruments
+                    for instrument in ['BTC', 'ETH', 'SOL']:
+                        trades_sub = {
+                            "method": "subscribe", 
+                            "subscription": {"type": "trades", "coin": instrument}
+                        }
+                        ws.send(json.dumps(trades_sub))
+                        add_debug_msg(f"✅ Simple test: Sent {instrument} trades subscription")
+                        
+                        # Send L2 book subscription
+                        book_sub = {
+                            "method": "subscribe",
+                            "subscription": {"type": "l2Book", "coin": instrument}
+                        }
+                        ws.send(json.dumps(book_sub))
+                        add_debug_msg(f"✅ Simple test: Sent {instrument} L2Book subscription")
+                    
+                    add_debug_msg("🚀 Simple test: All subscriptions sent!")
+                    
+                except Exception as e:
+                    add_debug_msg(f"❌ Simple test: Error sending subscriptions: {str(e)}")
             
             def on_error(ws, error):
-                add_debug_msg(f"Simple test error: {str(error)}")
+                add_debug_msg(f"❌ Simple test error: {str(error)}")
+                add_debug_msg(f"Error type: {type(error).__name__}")
             
             def on_close(ws, close_status_code, close_msg):
-                add_debug_msg(f"Simple test closed: {close_msg}")
+                add_debug_msg(f"🔴 Simple test closed: {close_msg} (code: {close_status_code})")
+            
+            add_debug_msg("Creating simple WebSocket connection...")
             
             # Create simple WebSocket
             ws = websocket.WebSocketApp(
@@ -407,17 +440,25 @@ def test_simple_websocket():
                 on_close=on_close
             )
             
-            # Run WebSocket
-            ws.run_forever()
+            add_debug_msg("Starting simple WebSocket run_forever...")
+            
+            # Run WebSocket with timeout
+            ws.run_forever(
+                ping_interval=60,
+                ping_timeout=10,
+                skip_utf8_validation=True
+            )
             
         except Exception as e:
-            add_debug_msg(f"Simple test exception: {str(e)}")
+            add_debug_msg(f"❌ Simple test exception: {str(e)}")
+            add_debug_msg(f"Exception traceback: {traceback.format_exc()}")
     
     # Run in thread
+    add_debug_msg("Starting simple test thread...")
     thread = threading.Thread(target=simple_ws_test, daemon=True)
     thread.start()
     
-    return "Started simple WebSocket test"
+    return "Started enhanced simple WebSocket test"
     """Test WebSocket connection manually with basic async implementation"""
     import asyncio
     import websockets
@@ -1049,6 +1090,9 @@ if 'ws_state' in st.session_state and st.session_state.ws_state.connected:
     st.sidebar.success(f"WebSocket Connected ({connection_type})")
     st.sidebar.text(f"Messages: {status['time_since_message']:.1f}s ago")
     st.sidebar.text(f"Queue: {ws_message_queue.qsize()}")
+elif ws_message_queue.qsize() > 0:
+    # If we have messages in queue but state shows disconnected, show as receiving data
+    st.sidebar.success(f"Receiving Data (Queue: {ws_message_queue.qsize()})")
 else:
     st.sidebar.error("WebSocket Disconnected")
     col1, col2 = st.sidebar.columns(2)
@@ -1057,8 +1101,8 @@ else:
             result = start_websocket(use_alternative=False)
             st.sidebar.info(result)
     with col2:
-        if st.button("Alt Connect", key="sidebar_alt_connect"):
-            result = start_websocket(use_alternative=True)
+        if st.button("Simple Test", key="sidebar_simple_test"):
+            result = test_simple_websocket()
             st.sidebar.info(result)
 
 # Create tabs
@@ -1462,11 +1506,15 @@ if len(st.session_state.processed_stats) > 100:
 if processed_count > 0:
     st.sidebar.text(f"Processed: {processed_count} msgs")
 
-# Auto-start WebSocket if not connected (DISABLED for debugging)
-# if 'ws_state' in st.session_state and not st.session_state.ws_state.connected:
-#     if not st.session_state.ws_state.thread or not st.session_state.ws_state.thread.is_alive():
-#         # Try alternative WebSocket by default since standard might have issues
-#         start_websocket(use_alternative=True)
+# Auto-start WebSocket if not connected
+if 'ws_state' not in st.session_state:
+    st.session_state.ws_state = WebSocketState()
+
+if not st.session_state.ws_state.connected:
+    if not st.session_state.ws_state.thread or not st.session_state.ws_state.thread.is_alive():
+        # Auto-start with standard WebSocket
+        add_debug_msg("Auto-starting WebSocket connection")
+        start_websocket(use_alternative=False)
 
 # Initial data load
 if not st.session_state.order_books or not st.session_state.funding_rates:

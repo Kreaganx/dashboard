@@ -1150,128 +1150,103 @@ with tab1:
                     spread = top_ask - top_bid
                     spread_bps = (spread / mid_price) * 10000
                     
-                    # Create enhanced dataframes with cumulative volume
-                    bid_df = pd.DataFrame(bids[:10])  # Show more levels
+                    # Create enhanced dataframes
+                    bid_df = pd.DataFrame(bids[:10])
                     bid_df['px'] = pd.to_numeric(bid_df['px'])
                     bid_df['sz'] = pd.to_numeric(bid_df['sz'])
                     bid_df['total'] = bid_df['px'] * bid_df['sz']
-                    bid_df['cumulative'] = bid_df['sz'].cumsum()
                     bid_df = bid_df.sort_values('px', ascending=False)  # Highest bid first
                     
-                    ask_df = pd.DataFrame(asks[:10])  # Show more levels
+                    ask_df = pd.DataFrame(asks[:10])
                     ask_df['px'] = pd.to_numeric(ask_df['px'])
                     ask_df['sz'] = pd.to_numeric(ask_df['sz'])
                     ask_df['total'] = ask_df['px'] * ask_df['sz']
-                    ask_df['cumulative'] = ask_df['sz'].cumsum()
                     ask_df = ask_df.sort_values('px', ascending=True)  # Lowest ask first
                     
-                    # Calculate intensity for color gradients (normalized 0-1)
-                    max_bid_size = bid_df['sz'].max()
-                    max_ask_size = ask_df['sz'].max()
-                    max_size = max(max_bid_size, max_ask_size)
+                    # Display header
+                    st.subheader(f"{instrument} Order Book")
                     
-                    bid_df['intensity'] = bid_df['sz'] / max_size
-                    ask_df['intensity'] = ask_df['sz'] / max_size
+                    # Quick stats row
+                    col1, col2, col3, col4 = st.columns(4)
+                    col1.metric("Best Bid", f"${top_bid:.4f}")
+                    col2.metric("Best Ask", f"${top_ask:.4f}")
+                    col3.metric("Spread", f"{spread_bps:.2f} bps")
+                    col4.metric("Mid Price", f"${mid_price:.4f}")
                     
-                    # Professional Order Book Display
+                    # Create styled order book using streamlit dataframes with color coding
+                    st.markdown("**Asks (Sells)**")
+                    
+                    # Style asks with red background gradient
+                    ask_display = ask_df.copy()
+                    ask_display.columns = ['Price', 'Size', 'Orders', 'Total']
+                    ask_display = ask_display[['Price', 'Size', 'Total']].iloc[::-1]  # Reverse to show highest first
+                    
+                    # Display asks
+                    st.dataframe(
+                        ask_display.style.background_gradient(
+                            subset=['Size'], 
+                            cmap='Reds', 
+                            vmin=0, 
+                            vmax=ask_display['Size'].max()
+                        ).format({
+                            'Price': '${:.4f}',
+                            'Size': '{:.1f}',
+                            'Total': '${:.0f}'
+                        }),
+                        use_container_width=True
+                    )
+                    
+                    # Spread display
                     st.markdown(f"""
-                    <div style="background: linear-gradient(135deg, #1e3a8a 0%, #1e40af 100%); 
-                                padding: 15px; border-radius: 10px; margin: 10px 0;">
-                        <h4 style="color: white; text-align: center; margin: 0; font-weight: 600;">
-                            {instrument} Order Book
-                        </h4>
+                    <div style='text-align: center; padding: 10px; background-color: #2d3748; 
+                                border-radius: 5px; margin: 10px 0; color: #fbbf24;'>
+                        <strong>Spread: ${spread:.4f} ({spread_bps:.2f} bps) | Mid: ${mid_price:.4f}</strong>
                     </div>
                     """, unsafe_allow_html=True)
                     
-                    # Order Book Table with Professional Styling
-                    order_book_html = f"""
-                    <div style="font-family: 'Courier New', monospace; background: #0f172a; 
-                                border-radius: 8px; overflow: hidden; border: 1px solid #334155;">
-                        
-                        <!-- Header -->
-                        <div style="background: #1e293b; padding: 8px; display: flex; 
-                                    justify-content: space-between; font-weight: bold; color: #e2e8f0;">
-                            <span style="width: 25%; text-align: right;">Price</span>
-                            <span style="width: 25%; text-align: right;">Size</span>
-                            <span style="width: 25%; text-align: right;">Total</span>
-                            <span style="width: 25%; text-align: right;">Cum. Vol</span>
-                        </div>
-                        
-                        <!-- Asks (Sells) - Highest to Lowest -->
-                    """
+                    st.markdown("**Bids (Buys)**")
                     
-                    # Add asks (reversed to show highest first, closest to spread last)
-                    for _, row in ask_df.iloc[::-1].iterrows():
-                        intensity = row['intensity']
-                        bg_opacity = 0.1 + (intensity * 0.4)  # 10% to 50% opacity
-                        order_book_html += f"""
-                        <div style="display: flex; justify-content: space-between; padding: 4px 8px;
-                                    background: rgba(239, 68, 68, {bg_opacity}); color: #fca5a5;">
-                            <span style="width: 25%; text-align: right;">{row['px']:.4f}</span>
-                            <span style="width: 25%; text-align: right;">{row['sz']:.1f}</span>
-                            <span style="width: 25%; text-align: right;">{row['total']:.0f}</span>
-                            <span style="width: 25%; text-align: right;">{row['cumulative']:.1f}</span>
-                        </div>
-                        """
+                    # Style bids with green background gradient
+                    bid_display = bid_df.copy()
+                    bid_display.columns = ['Price', 'Size', 'Orders', 'Total']
+                    bid_display = bid_display[['Price', 'Size', 'Total']]
                     
-                    # Spread section
-                    order_book_html += f"""
-                        <div style="background: #374151; padding: 8px; text-align: center; 
-                                    border-top: 1px solid #4b5563; border-bottom: 1px solid #4b5563;">
-                            <span style="color: #f59e0b; font-weight: bold;">
-                                Spread: ${spread:.4f} ({spread_bps:.2f} bps)
-                            </span>
-                            <br>
-                            <span style="color: #94a3b8; font-size: 0.9em;">
-                                Mid: ${mid_price:.4f}
-                            </span>
-                        </div>
-                    """
+                    # Display bids
+                    st.dataframe(
+                        bid_display.style.background_gradient(
+                            subset=['Size'], 
+                            cmap='Greens', 
+                            vmin=0, 
+                            vmax=bid_display['Size'].max()
+                        ).format({
+                            'Price': '${:.4f}',
+                            'Size': '{:.1f}',
+                            'Total': '${:.0f}'
+                        }),
+                        use_container_width=True
+                    )
                     
-                    # Add bids (highest to lowest)
-                    for _, row in bid_df.iterrows():
-                        intensity = row['intensity']
-                        bg_opacity = 0.1 + (intensity * 0.4)  # 10% to 50% opacity
-                        order_book_html += f"""
-                        <div style="display: flex; justify-content: space-between; padding: 4px 8px;
-                                    background: rgba(34, 197, 94, {bg_opacity}); color: #86efac;">
-                            <span style="width: 25%; text-align: right;">{row['px']:.4f}</span>
-                            <span style="width: 25%; text-align: right;">{row['sz']:.1f}</span>
-                            <span style="width: 25%; text-align: right;">{row['total']:.0f}</span>
-                            <span style="width: 25%; text-align: right;">{row['cumulative']:.1f}</span>
-                        </div>
-                        """
-                    
-                    order_book_html += "</div>"
-                    
-                    # Display the order book
-                    st.markdown(order_book_html, unsafe_allow_html=True)
-                    
-                    # Market depth visualization
-                    st.subheader("Market Depth")
+                    # Bar chart visualization (back to the original style)
+                    st.subheader("Order Book Depth")
                     
                     fig = go.Figure()
                     
-                    # Add bid depth (green)
-                    fig.add_trace(go.Scatter(
-                        x=bid_df['px'],
-                        y=bid_df['cumulative'],
-                        mode='lines',
-                        name='Bid Depth',
-                        line=dict(color='#22c55e', width=3),
-                        fill='tonexty',
-                        fillcolor='rgba(34, 197, 94, 0.3)'
+                    # Add asks (red bars)
+                    fig.add_trace(go.Bar(
+                        x=ask_df['px'],
+                        y=ask_df['sz'],
+                        name='Asks',
+                        marker_color='rgba(239, 68, 68, 0.8)',
+                        opacity=0.8
                     ))
                     
-                    # Add ask depth (red)
-                    fig.add_trace(go.Scatter(
-                        x=ask_df['px'],
-                        y=ask_df['cumulative'],
-                        mode='lines',
-                        name='Ask Depth',
-                        line=dict(color='#ef4444', width=3),
-                        fill='tonexty',
-                        fillcolor='rgba(239, 68, 68, 0.3)'
+                    # Add bids (green bars)
+                    fig.add_trace(go.Bar(
+                        x=bid_df['px'],
+                        y=bid_df['sz'],
+                        name='Bids',
+                        marker_color='rgba(34, 197, 94, 0.8)',
+                        opacity=0.8
                     ))
                     
                     # Add mid price line
@@ -1282,29 +1257,16 @@ with tab1:
                     )
                     
                     fig.update_layout(
-                        title=f"{instrument} Market Depth",
-                        xaxis_title="Price ($)",
-                        yaxis_title="Cumulative Volume",
+                        title=f"{instrument} Order Book Depth",
+                        xaxis_title="Price",
+                        yaxis_title="Size",
+                        barmode='group',
                         height=400,
                         template="plotly_dark",
-                        showlegend=True,
-                        legend=dict(
-                            orientation="h",
-                            yanchor="bottom",
-                            y=1.02,
-                            xanchor="right",
-                            x=1
-                        )
+                        showlegend=True
                     )
                     
                     st.plotly_chart(fig, use_container_width=True)
-                    
-                    # Quick stats
-                    col1, col2, col3, col4 = st.columns(4)
-                    col1.metric("Best Bid", f"${top_bid:.4f}")
-                    col2.metric("Best Ask", f"${top_ask:.4f}")
-                    col3.metric("Spread", f"{spread_bps:.2f} bps")
-                    col4.metric("Mid Price", f"${mid_price:.4f}")
                 else:
                     st.warning(f"No valid order book data for {instrument}")
             else:

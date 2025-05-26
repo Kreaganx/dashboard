@@ -358,7 +358,66 @@ async def connect_websocket_async(instruments, ws_state):
         add_debug_msg(f"Error details: {repr(e)}")
         ws_state.mark_disconnected()
 
-def test_manual_websocket():
+def test_simple_websocket():
+    """Simple WebSocket test that should work"""
+    add_debug_msg("Starting simple WebSocket test...")
+    
+    def simple_ws_test():
+        try:
+            import websocket
+            
+            def on_message(ws, message):
+                add_debug_msg(f"Simple test received: {message[:100]}")
+                try:
+                    if message != "Websocket connection established.":
+                        data = json.loads(message)
+                        ws_message_queue.put(data, block=False)
+                        add_debug_msg("Simple test: Queued message")
+                except:
+                    pass
+            
+            def on_open(ws):
+                add_debug_msg("Simple test WebSocket opened!")
+                # Send subscription
+                ws.send(json.dumps({
+                    "method": "subscribe",
+                    "subscription": {"type": "allMids"}
+                }))
+                add_debug_msg("Simple test: Sent allMids subscription")
+                
+                # Send BTC trades subscription
+                ws.send(json.dumps({
+                    "method": "subscribe", 
+                    "subscription": {"type": "trades", "coin": "BTC"}
+                }))
+                add_debug_msg("Simple test: Sent BTC trades subscription")
+            
+            def on_error(ws, error):
+                add_debug_msg(f"Simple test error: {str(error)}")
+            
+            def on_close(ws, close_status_code, close_msg):
+                add_debug_msg(f"Simple test closed: {close_msg}")
+            
+            # Create simple WebSocket
+            ws = websocket.WebSocketApp(
+                "wss://api.hyperliquid.xyz/ws",
+                on_message=on_message,
+                on_open=on_open,
+                on_error=on_error,
+                on_close=on_close
+            )
+            
+            # Run WebSocket
+            ws.run_forever()
+            
+        except Exception as e:
+            add_debug_msg(f"Simple test exception: {str(e)}")
+    
+    # Run in thread
+    thread = threading.Thread(target=simple_ws_test, daemon=True)
+    thread.start()
+    
+    return "Started simple WebSocket test"
     """Test WebSocket connection manually with basic async implementation"""
     import asyncio
     import websockets
@@ -750,7 +809,7 @@ def run_websocket_thread(instruments, ws_state):
     add_debug_msg(f"WebSocket thread {thread_id} ended")
 
 def start_websocket(use_alternative=False):
-    """Start WebSocket connection with option to use alternative implementation"""
+    """Start WebSocket connection - simplified version"""
     if 'ws_state' not in st.session_state:
         st.session_state.ws_state = WebSocketState()
     
@@ -764,30 +823,22 @@ def start_websocket(use_alternative=False):
     
     # Start new connection
     session_id = st.session_state.ws_state.new_session()
-    connection_type = "alternative" if use_alternative else "standard"
-    add_debug_msg(f"Starting new {connection_type} WebSocket session: {session_id}")
     
-    # Create and start thread
     if use_alternative:
-        ws_thread = threading.Thread(
-            target=run_alternative_websocket_thread,
-            args=(instruments, st.session_state.ws_state),
-            daemon=True
-        )
+        add_debug_msg(f"Starting test WebSocket session: {session_id}")
+        # Use simple test for now
+        return test_simple_websocket()
     else:
+        add_debug_msg(f"Starting standard WebSocket session: {session_id}")
         ws_thread = threading.Thread(
             target=run_websocket_thread,
             args=(instruments, st.session_state.ws_state),
             daemon=True
         )
+        ws_thread.start()
+        st.session_state.ws_state.set_thread(ws_thread)
     
-    ws_thread.start()
-    
-    # Update state
-    st.session_state.ws_state.set_thread(ws_thread)
-    st.session_state.use_alternative_ws = use_alternative
-    
-    return f"Started {connection_type} WebSocket connection (session: {session_id})"
+    return f"Started WebSocket connection (session: {session_id})"
 
 def process_websocket_messages():
     """Process WebSocket messages with improved error handling and debugging"""
@@ -1327,12 +1378,12 @@ with tab4:
                 result = start_websocket(use_alternative=False)
                 st.success(result)
             
-            if st.button("Alternative WebSocket", key="alt_reconnect"):
+            if st.button("Simple Test", key="alt_reconnect"):
                 result = start_websocket(use_alternative=True)
                 st.success(result)
             
             if st.button("Manual Test", key="manual_test"):
-                result = test_manual_websocket()
+                result = test_simple_websocket()
                 st.success(result)
             
             if st.button("Stop Connection", key="stop_connection"):

@@ -1411,11 +1411,11 @@ if len(st.session_state.processed_stats) > 100:
 if processed_count > 0:
     st.sidebar.text(f"Processed: {processed_count} msgs")
 
-# Auto-start WebSocket if not connected
-if 'ws_state' in st.session_state and not st.session_state.ws_state.connected:
-    if not st.session_state.ws_state.thread or not st.session_state.ws_state.thread.is_alive():
-        # Try alternative WebSocket by default since standard might have issues
-        start_websocket(use_alternative=True)
+# Auto-start WebSocket if not connected (DISABLED for debugging)
+# if 'ws_state' in st.session_state and not st.session_state.ws_state.connected:
+#     if not st.session_state.ws_state.thread or not st.session_state.ws_state.thread.is_alive():
+#         # Try alternative WebSocket by default since standard might have issues
+#         start_websocket(use_alternative=True)
 
 # Initial data load
 if not st.session_state.order_books or not st.session_state.funding_rates:

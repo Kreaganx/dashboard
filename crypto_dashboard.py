@@ -6,7 +6,7 @@ import hmac
 import hashlib
 import base64
 from typing import Dict, List, Any, Optional, Callable
-import requests  # Use requests instead of aiohttp for simpler deployment
+import requests
 import websockets
 from datetime import datetime, timedelta
 import threading
@@ -30,7 +30,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# Simple HTTP client for Hyperliquid API (replaces hyperliquid SDK dependency)
+# Simple HTTP client for Hyperliquid API
 class SimpleHyperliquidClient:
     """Simple HTTP client for Hyperliquid API endpoints"""
     
@@ -87,7 +87,7 @@ class SimpleHyperliquidClient:
             return {}
 
 # Create thread-safe queues
-ws_message_queue = queue.Queue(maxsize=10000)  # Limit queue size
+ws_message_queue = queue.Queue(maxsize=10000)
 debug_message_queue = queue.Queue(maxsize=1000)
 
 # Thread-safe WebSocket state manager
@@ -104,16 +104,19 @@ class WebSocketState:
         self.lock = threading.Lock()
         self.should_run = True
         self.subscriptions = {}
+        self.connection_type = "none"  # Track which connection type is active
     
-    def mark_connected(self):
+    def mark_connected(self, connection_type="websocket-client"):
         with self.lock:
             self.connected = True
             self.last_message_time = time.time()
+            self.connection_type = connection_type
             return self.connected
     
     def mark_disconnected(self):
         with self.lock:
             self.connected = False
+            self.connection_type = "none"
             return self.connected
     
     def update_last_message_time(self):
@@ -164,7 +167,8 @@ class WebSocketState:
                 'session_id': self.session_id,
                 'reconnect_attempt': self.reconnect_attempt,
                 'should_run': self.should_run,
-                'subscriptions': len(self.subscriptions)
+                'subscriptions': len(self.subscriptions),
+                'connection_type': self.connection_type
             }
 
 def initialize_dashboard_state():
@@ -188,6 +192,8 @@ def initialize_dashboard_state():
         st.session_state.debug_msgs = []
     if 'processed_stats' not in st.session_state:
         st.session_state.processed_stats = []
+    if 'use_alternative_ws' not in st.session_state:
+        st.session_state.use_alternative_ws = False
 
 # Initialize dashboard state
 initialize_dashboard_state()
@@ -214,6 +220,16 @@ update_interval = st.sidebar.slider(
     step=5
 )
 
+# Trade threshold setting
+trade_threshold = st.sidebar.slider(
+    "Trade Threshold ($)",
+    min_value=100,
+    max_value=100000,
+    value=1000,  # Lowered from 50000 to 1000
+    step=500,
+    help="Show trades larger than this amount"
+)
+
 def add_debug_msg(msg):
     """Add debug message to queue with thread safety"""
     timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
@@ -231,9 +247,172 @@ def add_debug_msg(msg):
     
     print(full_msg)
 
-# Hyperliquid WebSocket Manager
+# Alternative WebSocket implementation using websockets library
+async def connect_websocket_async(instruments, ws_state):
+    """Alternative WebSocket connection using websockets library"""
+    add_debug_msg("Starting alternative WebSocket connection using websockets library")
+    
+    try:
+        # Connect to WebSocket
+        add_debug_msg("Connecting to wss://api.hyperliquid.xyz/ws")
+        
+        async with websockets.connect(
+            "wss://api.hyperliquid.xyz/ws",
+            ping_interval=50,
+            ping_timeout=10,
+            close_timeout=10
+        ) as ws:
+            add_debug_msg("Alternative WebSocket connected successfully!")
+            ws_state.mark_connected("websockets")
+            
+            # Subscribe to channels
+            add_debug_msg("Sending subscriptions...")
+            
+            # Subscribe to allMids
+            allmids_sub = {
+                "method": "subscribe",
+                "subscription": {"type": "allMids"}
+            }
+            await ws.send(json.dumps(allmids_sub))
+            add_debug_msg("Subscribed to allMids")
+            await asyncio.sleep(0.1)
+            
+            # Subscribe to instrument-specific channels
+            for instrument in instruments:
+                try:
+                    # L2 Book subscription
+                    book_sub = {
+                        "method": "subscribe",
+                        "subscription": {"type": "l2Book", "coin": instrument}
+                    }
+                    await ws.send(json.dumps(book_sub))
+                    add_debug_msg(f"Subscribed to l2Book for {instrument}")
+                    await asyncio.sleep(0.1)
+                    
+                    # Trades subscription
+                    trades_sub = {
+                        "method": "subscribe",
+                        "subscription": {"type": "trades", "coin": instrument}
+                    }
+                    await ws.send(json.dumps(trades_sub))
+                    add_debug_msg(f"Subscribed to trades for {instrument}")
+                    await asyncio.sleep(0.1)
+                    
+                except Exception as e:
+                    add_debug_msg(f"Error subscribing to {instrument}: {str(e)}")
+            
+            add_debug_msg("All subscriptions sent, listening for messages...")
+            
+            # Listen for messages
+            message_count = 0
+            async for message in ws:
+                try:
+                    message_count += 1
+                    
+                    # Handle connection confirmation
+                    if message == "Websocket connection established.":
+                        add_debug_msg("Received connection establishment confirmation")
+                        continue
+                    
+                    # Update last message time
+                    ws_state.update_last_message_time()
+                    
+                    # Parse JSON message
+                    try:
+                        data = json.loads(message)
+                    except json.JSONDecodeError:
+                        add_debug_msg(f"Non-JSON message: {message[:100]}")
+                        continue
+                    
+                    # Handle pong responses
+                    if data.get('channel') == 'pong':
+                        add_debug_msg("Received pong response")
+                        continue
+                    
+                    # Log first few messages for debugging
+                    if message_count <= 10:
+                        add_debug_msg(f"Message {message_count}: {data.get('channel', 'unknown')} channel")
+                    
+                    # Queue message for processing
+                    try:
+                        ws_message_queue.put(data, block=False)
+                    except queue.Full:
+                        # Clear old messages if queue is full
+                        try:
+                            for _ in range(100):
+                                ws_message_queue.get_nowait()
+                            ws_message_queue.put(data, block=False)
+                            add_debug_msg("Queue was full, cleared old messages")
+                        except:
+                            add_debug_msg("Failed to clear queue, dropping message")
+                
+                except Exception as e:
+                    add_debug_msg(f"Error processing message: {str(e)}")
+            
+    except websockets.exceptions.ConnectionClosed:
+        add_debug_msg("Alternative WebSocket connection closed")
+        ws_state.mark_disconnected()
+    except Exception as e:
+        add_debug_msg(f"Alternative WebSocket error: {str(e)}")
+        add_debug_msg(f"Error type: {type(e).__name__}")
+        add_debug_msg(f"Error details: {repr(e)}")
+        ws_state.mark_disconnected()
+
+def run_alternative_websocket_thread(instruments, ws_state):
+    """Run alternative WebSocket in a separate thread"""
+    thread_id = threading.get_ident()
+    add_debug_msg(f"Alternative WebSocket thread {thread_id} started")
+    
+    reconnect_delay = 5
+    max_reconnect_delay = 60
+    
+    while ws_state.should_run:
+        try:
+            add_debug_msg("Creating new event loop for alternative WebSocket")
+            
+            # Create new event loop for this thread
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            
+            add_debug_msg("Starting alternative WebSocket connection...")
+            loop.run_until_complete(connect_websocket_async(instruments, ws_state))
+            
+            # If we reach here, the connection ended
+            add_debug_msg("Alternative WebSocket connection ended")
+            
+            if not ws_state.should_run:
+                add_debug_msg("Alternative WebSocket thread told to stop, exiting")
+                break
+                
+            # Wait before reconnecting
+            add_debug_msg(f"Will reconnect alternative WebSocket in {reconnect_delay} seconds")
+            time.sleep(reconnect_delay)
+            
+            # Exponential backoff
+            reconnect_delay = min(reconnect_delay * 1.5, max_reconnect_delay)
+            
+        except Exception as e:
+            add_debug_msg(f"Alternative WebSocket thread error: {str(e)}")
+            add_debug_msg(traceback.format_exc())
+            
+            if not ws_state.should_run:
+                break
+                
+            # Wait before retrying
+            add_debug_msg(f"Error occurred, will retry alternative WebSocket in {reconnect_delay} seconds")
+            time.sleep(reconnect_delay)
+            reconnect_delay = min(reconnect_delay * 2, max_reconnect_delay)
+        finally:
+            try:
+                loop.close()
+            except:
+                pass
+    
+    add_debug_msg(f"Alternative WebSocket thread {thread_id} ended")
+
+# Original WebSocket implementation with enhanced debugging
 class HyperliquidWebSocketManager:
-    """WebSocket manager for Hyperliquid API"""
+    """WebSocket manager for Hyperliquid API with enhanced debugging"""
     
     def __init__(self, instruments, ws_state):
         self.instruments = instruments
@@ -245,11 +424,15 @@ class HyperliquidWebSocketManager:
         self.ws_url = "wss://api.hyperliquid.xyz/ws"
         
     def start(self):
-        """Start the WebSocket connection"""
+        """Start the WebSocket connection with enhanced debugging"""
+        # Enable WebSocket debugging
+        websocket.enableTrace(True)
+        
         self.stop_event.clear()
         self.ws_state.new_session()
         
         add_debug_msg(f"Starting Hyperliquid WebSocket connection to {self.ws_url}")
+        add_debug_msg(f"Selected instruments: {self.instruments}")
         
         # Create WebSocket with proper handlers
         self.ws = websocket.WebSocketApp(
@@ -267,17 +450,23 @@ class HyperliquidWebSocketManager:
         self.ping_thread = threading.Thread(target=self.send_ping_loop, daemon=True)
         self.ping_thread.start()
         
-        # Run WebSocket
+        # Run WebSocket with better error handling
         try:
             add_debug_msg("Starting WebSocket run_forever...")
             self.ws.run_forever(
-                ping_interval=0,  # We handle pings manually
+                ping_interval=0,
                 ping_timeout=10,
-                reconnect=0
+                reconnect=0,
+                skip_utf8_validation=True,
+                http_proxy_host=None,
+                http_proxy_port=None
             )
             add_debug_msg("WebSocket run_forever completed normally")
         except Exception as e:
             add_debug_msg(f"WebSocket run_forever error: {str(e)}")
+            add_debug_msg(f"Error type: {type(e).__name__}")
+            add_debug_msg(f"Error details: {repr(e)}")
+            add_debug_msg(traceback.format_exc())
         finally:
             add_debug_msg("WebSocket cleanup started")
             self.cleanup()
@@ -302,7 +491,7 @@ class HyperliquidWebSocketManager:
     def on_open(self, ws):
         """Handle WebSocket connection open"""
         add_debug_msg("WebSocket connection opened successfully")
-        self.ws_state.mark_connected()
+        self.ws_state.mark_connected("websocket-client")
         
         # Wait a moment for connection to stabilize
         time.sleep(0.5)
@@ -314,8 +503,16 @@ class HyperliquidWebSocketManager:
             add_debug_msg(f"Error during initial subscription: {str(e)}")
     
     def on_message(self, ws, message):
-        """Handle incoming WebSocket messages"""
+        """Handle incoming WebSocket messages with enhanced debugging"""
         try:
+            # Debug: Log raw message (first 10 messages only)
+            if not hasattr(self, 'message_count'):
+                self.message_count = 0
+            
+            self.message_count += 1
+            if self.message_count <= 10:
+                add_debug_msg(f"Raw WebSocket message {self.message_count}: {message[:200]}")
+            
             # Handle connection confirmation message
             if message == "Websocket connection established.":
                 add_debug_msg("Received connection establishment confirmation")
@@ -336,6 +533,10 @@ class HyperliquidWebSocketManager:
                 add_debug_msg("Received pong response")
                 return
             
+            # Debug: Log message type
+            if self.message_count <= 20:
+                add_debug_msg(f"Parsed message {self.message_count}: {data.get('channel', 'unknown')} channel")
+            
             # Queue message for processing
             try:
                 ws_message_queue.put(data, block=False)
@@ -351,10 +552,13 @@ class HyperliquidWebSocketManager:
             
         except Exception as e:
             add_debug_msg(f"Error in on_message: {str(e)}")
+            add_debug_msg(traceback.format_exc())
     
     def on_error(self, ws, error):
-        """Handle WebSocket errors"""
+        """Handle WebSocket errors with enhanced debugging"""
         add_debug_msg(f"WebSocket error: {str(error)}")
+        add_debug_msg(f"Error type: {type(error).__name__}")
+        add_debug_msg(f"Error details: {repr(error)}")
         self.ws_state.mark_disconnected()
     
     def on_close(self, ws, close_status_code, close_msg):
@@ -383,8 +587,10 @@ class HyperliquidWebSocketManager:
         add_debug_msg("Ping loop stopped")
     
     def subscribe_to_channels(self):
-        """Subscribe to all required channels"""
+        """Subscribe to all required channels with enhanced debugging"""
         subscription_count = 0
+        
+        add_debug_msg(f"Starting subscriptions for instruments: {self.instruments}")
         
         # Subscribe to allMids first
         try:
@@ -435,7 +641,7 @@ class HyperliquidWebSocketManager:
             }
 
 def run_websocket_thread(instruments, ws_state):
-    """Run WebSocket in a separate thread"""
+    """Run WebSocket in a separate thread with improved error handling"""
     thread_id = threading.get_ident()
     add_debug_msg(f"WebSocket thread {thread_id} started")
     
@@ -466,6 +672,7 @@ def run_websocket_thread(instruments, ws_state):
             
         except Exception as e:
             add_debug_msg(f"WebSocket thread error: {str(e)}")
+            add_debug_msg(traceback.format_exc())
             
             if not ws_state.should_run:
                 break
@@ -477,8 +684,8 @@ def run_websocket_thread(instruments, ws_state):
     
     add_debug_msg(f"WebSocket thread {thread_id} ended")
 
-def start_websocket():
-    """Start WebSocket connection with proper thread management"""
+def start_websocket(use_alternative=False):
+    """Start WebSocket connection with option to use alternative implementation"""
     if 'ws_state' not in st.session_state:
         st.session_state.ws_state = WebSocketState()
     
@@ -492,23 +699,33 @@ def start_websocket():
     
     # Start new connection
     session_id = st.session_state.ws_state.new_session()
-    add_debug_msg(f"Starting new WebSocket session: {session_id}")
+    connection_type = "alternative" if use_alternative else "standard"
+    add_debug_msg(f"Starting new {connection_type} WebSocket session: {session_id}")
     
     # Create and start thread
-    ws_thread = threading.Thread(
-        target=run_websocket_thread,
-        args=(instruments, st.session_state.ws_state),
-        daemon=True
-    )
+    if use_alternative:
+        ws_thread = threading.Thread(
+            target=run_alternative_websocket_thread,
+            args=(instruments, st.session_state.ws_state),
+            daemon=True
+        )
+    else:
+        ws_thread = threading.Thread(
+            target=run_websocket_thread,
+            args=(instruments, st.session_state.ws_state),
+            daemon=True
+        )
+    
     ws_thread.start()
     
     # Update state
     st.session_state.ws_state.set_thread(ws_thread)
+    st.session_state.use_alternative_ws = use_alternative
     
-    return f"Started WebSocket connection (session: {session_id})"
+    return f"Started {connection_type} WebSocket connection (session: {session_id})"
 
 def process_websocket_messages():
-    """Process WebSocket messages with improved error handling"""
+    """Process WebSocket messages with improved error handling and debugging"""
     processed_count = 0
     trade_count = 0
     orderbook_count = 0
@@ -534,6 +751,10 @@ def process_websocket_messages():
             
             channel = message.get('channel', 'unknown')
             
+            # Debug first few messages
+            if processed_count <= 5:
+                add_debug_msg(f"Processing message {processed_count}: {channel} channel")
+            
             # Process order book updates
             if channel == 'l2Book' and 'data' in message:
                 orderbook_count += 1
@@ -548,6 +769,10 @@ def process_websocket_messages():
                 trades = message['data']
                 if not trades:
                     continue
+                
+                # Debug trade messages
+                if trade_count < 3:
+                    add_debug_msg(f"Received {len(trades)} trades: {[t.get('coin') for t in trades]}")
                 
                 for trade in trades:
                     instrument = trade.get('coin')
@@ -568,12 +793,16 @@ def process_websocket_messages():
                             price = float(trade['px'])
                             notional = size * price
                             
-                            # Record large trades (>$50k)
-                            if notional > 50000:
+                            # Record trades above threshold (now configurable)
+                            if notional > trade_threshold:
                                 large_trade_count += 1
                                 trade_time = datetime.fromtimestamp(
                                     int(trade.get('time', time.time() * 1000)) / 1000
                                 )
+                                
+                                # Debug large trades
+                                if large_trade_count <= 3:
+                                    add_debug_msg(f"Large trade: {instrument} {side} ${notional:.2f}")
                                 
                                 # Add to trades list (thread-safe)
                                 if len(st.session_state.trades) >= 100:
@@ -699,15 +928,21 @@ st.markdown("Real-time monitoring of order books and funding rates")
 
 # WebSocket status in sidebar
 if 'ws_state' in st.session_state and st.session_state.ws_state.connected:
-    st.sidebar.success(f"WebSocket Connected")
     status = st.session_state.ws_state.get_status()
+    st.sidebar.success(f"WebSocket Connected ({status['connection_type']})")
     st.sidebar.text(f"Messages: {status['time_since_message']:.1f}s ago")
     st.sidebar.text(f"Queue: {ws_message_queue.qsize()}")
 else:
     st.sidebar.error("WebSocket Disconnected")
-    if st.sidebar.button("Connect WebSocket", key="sidebar_connect"):
-        result = start_websocket()
-        st.sidebar.info(result)
+    col1, col2 = st.sidebar.columns(2)
+    with col1:
+        if st.button("Connect", key="sidebar_connect"):
+            result = start_websocket(use_alternative=False)
+            st.sidebar.info(result)
+    with col2:
+        if st.button("Alt Connect", key="sidebar_alt_connect"):
+            result = start_websocket(use_alternative=True)
+            st.sidebar.info(result)
 
 # Create tabs
 tab1, tab2, tab3, tab4 = st.tabs(["Order Books", "Funding Rates", "Recent Trades", "Debug"])
@@ -855,22 +1090,28 @@ with tab2:
 with tab3:
     st.header("Recent Large Trades")
     
-    col1, col2 = st.columns([3, 1])
+    col1, col2, col3 = st.columns([2, 1, 1])
     
     with col1:
         if 'ws_state' in st.session_state and st.session_state.ws_state.connected:
-            st.success("WebSocket Connected - Receiving Live Trade Data")
-            st.info(f"Queue: {ws_message_queue.qsize()} | Trades: {len(st.session_state.trades)}")
+            status = st.session_state.ws_state.get_status()
+            st.success(f"WebSocket Connected ({status['connection_type']}) - Receiving Live Trade Data")
+            st.info(f"Queue: {ws_message_queue.qsize()} | Trades: {len(st.session_state.trades)} | Threshold: ${trade_threshold:,}")
         else:
-            st.warning("WebSocket Disconnected - Click 'Connect WebSocket' to start")
+            st.warning("WebSocket Disconnected - Click 'Connect' to start")
     
     with col2:
         if st.button("Connect WebSocket", key="trades_connect"):
-            result = start_websocket()
+            result = start_websocket(use_alternative=False)
+            st.info(result)
+    
+    with col3:
+        if st.button("Try Alternative", key="trades_alt_connect"):
+            result = start_websocket(use_alternative=True)
             st.info(result)
     
     if st.session_state.trades:
-        st.info(f"Received {len(st.session_state.trades)} large trades (>$50,000)")
+        st.info(f"Received {len(st.session_state.trades)} large trades (>${trade_threshold:,})")
         
         # Convert to DataFrame
         trades_df = pd.DataFrame(st.session_state.trades)
@@ -883,7 +1124,7 @@ with tab3:
         trades_display['color'] = trades_display['side'].apply(lambda x: "🟢" if x == "Buy" else "🔴")
         trades_display['trade'] = trades_display['color'] + " " + trades_display['side']
         
-        st.subheader("Last 100 Large Trades (>$50,000)")
+        st.subheader(f"Recent Large Trades (>${trade_threshold:,})")
         st.dataframe(
             trades_display[['time', 'instrument', 'trade', 'price', 'size', 'notional']],
             use_container_width=True
@@ -952,7 +1193,7 @@ with tab3:
                 )])
                 st.plotly_chart(fig, use_container_width=True)
     else:
-        st.info("Waiting for trades data... Connect WebSocket to see real-time trades.")
+        st.info(f"Waiting for trades data... Connect WebSocket to see real-time trades above ${trade_threshold:,}")
 
 # Debug Tab
 with tab4:
@@ -964,7 +1205,7 @@ with tab4:
     if 'ws_state' in st.session_state:
         status = st.session_state.ws_state.get_status()
         
-        status_cols = st.columns(4)
+        status_cols = st.columns(5)
         
         with status_cols[0]:
             if status['connected']:
@@ -991,27 +1232,35 @@ with tab4:
             else:
                 st.error(f"Last Msg: {status['time_since_message']:.1f}s")
         
+        with status_cols[4]:
+            st.info(f"Type: {status['connection_type']}")
+        
         # Detailed status
         st.subheader("Detailed Status")
         col1, col2 = st.columns(2)
         
         with col1:
-            st.write(f"Session ID: {status['session_id']}")
-            st.write(f"Reconnect Attempts: {status['reconnect_attempt']}")
-            st.write(f"Should Run: {status['should_run']}")
-            st.write(f"Subscriptions: {status['subscriptions']}")
+            st.write(f"**Session ID:** {status['session_id']}")
+            st.write(f"**Reconnect Attempts:** {status['reconnect_attempt']}")
+            st.write(f"**Should Run:** {status['should_run']}")
+            st.write(f"**Subscriptions:** {status['subscriptions']}")
+            st.write(f"**Connection Type:** {status['connection_type']}")
             
             if status['last_message_time'] > 0:
                 last_msg_time = datetime.fromtimestamp(status['last_message_time']).strftime('%H:%M:%S')
-                st.write(f"Last Message Time: {last_msg_time}")
+                st.write(f"**Last Message Time:** {last_msg_time}")
             
             if status['time_since_ping'] < float('inf'):
-                st.write(f"Last Ping: {status['time_since_ping']:.1f}s ago")
+                st.write(f"**Last Ping:** {status['time_since_ping']:.1f}s ago")
         
         with col2:
             # Control buttons
-            if st.button("Force Reconnect", key="force_reconnect"):
-                result = start_websocket()
+            if st.button("Standard WebSocket", key="force_reconnect"):
+                result = start_websocket(use_alternative=False)
+                st.success(result)
+            
+            if st.button("Alternative WebSocket", key="alt_reconnect"):
+                result = start_websocket(use_alternative=True)
                 st.success(result)
             
             if st.button("Stop Connection", key="stop_connection"):
@@ -1021,7 +1270,7 @@ with tab4:
                         st.session_state.ws_state.ws_instance.close()
                 st.success("Connection stopped")
             
-            if st.button("Clear Data", key="clear_data"):
+            if st.button("Clear All Data", key="clear_data"):
                 st.session_state.trades = []
                 st.session_state.order_books = {}
                 st.session_state.latest_prices = {}
@@ -1051,7 +1300,7 @@ with tab4:
     # Raw Data
     st.subheader("Raw Trade Data")
     if st.session_state.trades:
-        st.write(f"Total trades: {len(st.session_state.trades)}")
+        st.write(f"**Total trades:** {len(st.session_state.trades)}")
         if st.session_state.trades:
             st.json(st.session_state.trades[-3:])
     else:
@@ -1093,7 +1342,8 @@ if processed_count > 0:
 # Auto-start WebSocket if not connected
 if 'ws_state' in st.session_state and not st.session_state.ws_state.connected:
     if not st.session_state.ws_state.thread or not st.session_state.ws_state.thread.is_alive():
-        start_websocket()
+        # Try alternative WebSocket by default since standard might have issues
+        start_websocket(use_alternative=True)
 
 # Initial data load
 if not st.session_state.order_books or not st.session_state.funding_rates:
@@ -1106,7 +1356,8 @@ if st.sidebar.checkbox("Auto-refresh", value=True, key="auto_refresh"):
     
     # Show connection status
     if 'ws_state' in st.session_state and st.session_state.ws_state.connected:
-        st.sidebar.success(f"WebSocket OK | Queue: {ws_message_queue.qsize()}")
+        status = st.session_state.ws_state.get_status()
+        st.sidebar.success(f"WebSocket OK ({status['connection_type']}) | Queue: {ws_message_queue.qsize()}")
     else:
         st.sidebar.error("WebSocket disconnected")
     

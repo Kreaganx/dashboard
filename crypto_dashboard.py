@@ -358,7 +358,72 @@ async def connect_websocket_async(instruments, ws_state):
         add_debug_msg(f"Error details: {repr(e)}")
         ws_state.mark_disconnected()
 
-def run_alternative_websocket_thread(instruments, ws_state):
+def test_manual_websocket():
+    """Test WebSocket connection manually with basic async implementation"""
+    import asyncio
+    import websockets
+    import json
+    import time
+    
+    async def test_connection():
+        try:
+            add_debug_msg("Testing manual WebSocket connection...")
+            
+            # Connect with simpler options
+            uri = "wss://api.hyperliquid.xyz/ws"
+            add_debug_msg(f"Connecting to {uri}")
+            
+            async with websockets.connect(uri, ping_interval=None) as websocket:
+                add_debug_msg("Manual WebSocket connected!")
+                
+                # Send a simple subscription
+                subscription = {
+                    "method": "subscribe",
+                    "subscription": {"type": "allMids"}
+                }
+                
+                await websocket.send(json.dumps(subscription))
+                add_debug_msg("Sent allMids subscription")
+                
+                # Listen for a few messages
+                for i in range(5):
+                    try:
+                        message = await asyncio.wait_for(websocket.recv(), timeout=10.0)
+                        add_debug_msg(f"Received message {i+1}: {message[:100]}")
+                        
+                        # Parse and queue the message
+                        if message != "Websocket connection established.":
+                            try:
+                                data = json.loads(message)
+                                ws_message_queue.put(data, block=False)
+                                add_debug_msg("Queued message for processing")
+                            except:
+                                pass
+                                
+                    except asyncio.TimeoutError:
+                        add_debug_msg(f"Timeout waiting for message {i+1}")
+                        break
+                        
+        except Exception as e:
+            add_debug_msg(f"Manual WebSocket test error: {str(e)}")
+    
+    def run_test():
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(test_connection())
+        except Exception as e:
+            add_debug_msg(f"Manual test thread error: {str(e)}")
+        finally:
+            try:
+                loop.close()
+            except:
+                pass
+    
+    # Run in background thread
+    thread = threading.Thread(target=run_test, daemon=True)
+    thread.start()
+    return "Started manual WebSocket test"
     """Run alternative WebSocket in a separate thread"""
     thread_id = threading.get_ident()
     add_debug_msg(f"Alternative WebSocket thread {thread_id} started")
@@ -1264,6 +1329,10 @@ with tab4:
             
             if st.button("Alternative WebSocket", key="alt_reconnect"):
                 result = start_websocket(use_alternative=True)
+                st.success(result)
+            
+            if st.button("Manual Test", key="manual_test"):
+                result = test_manual_websocket()
                 st.success(result)
             
             if st.button("Stop Connection", key="stop_connection"):

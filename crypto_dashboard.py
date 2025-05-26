@@ -1016,8 +1016,59 @@ with tab1:
                         height=table_height
                     )
                     
-                    # Market Depth visualization
-                    st.markdown("**Market Depth**")
+                    # Market Depth visualization with sentiment analysis
+                    
+                    # Calculate sentiment based on order book depth
+                    total_bid_volume = bid_df['sz'].sum()
+                    total_ask_volume = ask_df['sz'].sum()
+                    total_bid_value = bid_df['total'].sum()
+                    total_ask_value = ask_df['total'].sum()
+                    
+                    # Calculate bid/ask ratio for sentiment
+                    if total_ask_volume > 0:
+                        volume_ratio = total_bid_volume / total_ask_volume
+                    else:
+                        volume_ratio = float('inf')
+                    
+                    if total_ask_value > 0:
+                        value_ratio = total_bid_value / total_ask_value
+                    else:
+                        value_ratio = float('inf')
+                    
+                    # Determine sentiment based on ratios
+                    avg_ratio = (volume_ratio + value_ratio) / 2
+                    
+                    if avg_ratio > 1.2:
+                        sentiment = "🟢 Bullish"
+                        sentiment_color = "#22c55e"
+                        sentiment_desc = f"Strong bid support ({avg_ratio:.1f}x)"
+                    elif avg_ratio > 1.05:
+                        sentiment = "🟡 Slightly Bullish"
+                        sentiment_color = "#eab308"
+                        sentiment_desc = f"Bid leaning ({avg_ratio:.1f}x)"
+                    elif avg_ratio < 0.8:
+                        sentiment = "🔴 Bearish"
+                        sentiment_color = "#ef4444"
+                        sentiment_desc = f"Heavy ask pressure ({avg_ratio:.1f}x)"
+                    elif avg_ratio < 0.95:
+                        sentiment = "🟠 Slightly Bearish"
+                        sentiment_color = "#f97316"
+                        sentiment_desc = f"Ask leaning ({avg_ratio:.1f}x)"
+                    else:
+                        sentiment = "⚪ Neutral"
+                        sentiment_color = "#6b7280"
+                        sentiment_desc = f"Balanced ({avg_ratio:.1f}x)"
+                    
+                    # Header with asset name and sentiment
+                    st.markdown(f"""
+                    <div style='display: flex; justify-content: space-between; align-items: center; margin: 10px 0 5px 0;'>
+                        <h4 style='color: #f3f4f6; margin: 0; font-size: 1.1em;'>{instrument} Market Depth</h4>
+                        <div style='text-align: right;'>
+                            <div style='color: {sentiment_color}; font-weight: bold; font-size: 0.95em;'>{sentiment}</div>
+                            <div style='color: #9ca3af; font-size: 0.8em;'>{sentiment_desc}</div>
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
                     
                     fig = go.Figure()
                     
@@ -1027,7 +1078,9 @@ with tab1:
                         y=ask_df['sz'],
                         name='Asks',
                         marker_color='rgba(239, 68, 68, 0.8)',
-                        opacity=0.8
+                        opacity=0.8,
+                        hovertemplate='<b>Ask</b><br>Price: $%{x:.4f}<br>Size: %{y:.2f}<br>Value: $%{customdata:,.0f}<extra></extra>',
+                        customdata=ask_df['total']
                     ))
                     
                     # Add bids (green bars)
@@ -1036,25 +1089,33 @@ with tab1:
                         y=bid_df['sz'],
                         name='Bids',
                         marker_color='rgba(34, 197, 94, 0.8)',
-                        opacity=0.8
+                        opacity=0.8,
+                        hovertemplate='<b>Bid</b><br>Price: $%{x:.4f}<br>Size: %{y:.2f}<br>Value: $%{customdata:,.0f}<extra></extra>',
+                        customdata=bid_df['total']
                     ))
                     
                     # Add mid price line
                     fig.add_vline(
                         x=mid_price,
                         line=dict(color='#f59e0b', width=2, dash='dash'),
-                        annotation_text=f"Mid: ${mid_price:.4f}"
+                        annotation=dict(
+                            text=f"Mid: ${mid_price:.4f}",
+                            bgcolor='#f59e0b',
+                            bordercolor='#f59e0b',
+                            font=dict(color='#1f2937')
+                        )
                     )
                     
                     fig.update_layout(
-                        title=None,  # Remove title to save space
-                        xaxis_title="Price",
+                        title=None,
+                        xaxis_title="Price ($)",
                         yaxis_title="Size",
                         barmode='group',
-                        height=250,  # Smaller height
+                        height=250,
                         template="plotly_dark",
-                        showlegend=False,  # Remove legend to save space
-                        margin=dict(l=0, r=0, t=20, b=0)
+                        showlegend=False,
+                        margin=dict(l=0, r=0, t=10, b=0),
+                        hovermode='x unified'
                     )
                     
                     st.plotly_chart(fig, use_container_width=True)

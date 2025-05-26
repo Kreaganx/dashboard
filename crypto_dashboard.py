@@ -929,7 +929,8 @@ st.markdown("Real-time monitoring of order books and funding rates")
 # WebSocket status in sidebar
 if 'ws_state' in st.session_state and st.session_state.ws_state.connected:
     status = st.session_state.ws_state.get_status()
-    st.sidebar.success(f"WebSocket Connected ({status['connection_type']})")
+    connection_type = status.get('connection_type', 'unknown')
+    st.sidebar.success(f"WebSocket Connected ({connection_type})")
     st.sidebar.text(f"Messages: {status['time_since_message']:.1f}s ago")
     st.sidebar.text(f"Queue: {ws_message_queue.qsize()}")
 else:
@@ -1095,7 +1096,8 @@ with tab3:
     with col1:
         if 'ws_state' in st.session_state and st.session_state.ws_state.connected:
             status = st.session_state.ws_state.get_status()
-            st.success(f"WebSocket Connected ({status['connection_type']}) - Receiving Live Trade Data")
+            connection_type = status.get('connection_type', 'unknown')
+            st.success(f"WebSocket Connected ({connection_type}) - Receiving Live Trade Data")
             st.info(f"Queue: {ws_message_queue.qsize()} | Trades: {len(st.session_state.trades)} | Threshold: ${trade_threshold:,}")
         else:
             st.warning("WebSocket Disconnected - Click 'Connect' to start")
@@ -1233,7 +1235,8 @@ with tab4:
                 st.error(f"Last Msg: {status['time_since_message']:.1f}s")
         
         with status_cols[4]:
-            st.info(f"Type: {status['connection_type']}")
+            connection_type = status.get('connection_type', 'unknown')
+            st.info(f"Type: {connection_type}")
         
         # Detailed status
         st.subheader("Detailed Status")
@@ -1244,7 +1247,7 @@ with tab4:
             st.write(f"**Reconnect Attempts:** {status['reconnect_attempt']}")
             st.write(f"**Should Run:** {status['should_run']}")
             st.write(f"**Subscriptions:** {status['subscriptions']}")
-            st.write(f"**Connection Type:** {status['connection_type']}")
+            st.write(f"**Connection Type:** {status.get('connection_type', 'unknown')}")
             
             if status['last_message_time'] > 0:
                 last_msg_time = datetime.fromtimestamp(status['last_message_time']).strftime('%H:%M:%S')
@@ -1357,7 +1360,8 @@ if st.sidebar.checkbox("Auto-refresh", value=True, key="auto_refresh"):
     # Show connection status
     if 'ws_state' in st.session_state and st.session_state.ws_state.connected:
         status = st.session_state.ws_state.get_status()
-        st.sidebar.success(f"WebSocket OK ({status['connection_type']}) | Queue: {ws_message_queue.qsize()}")
+        connection_type = status.get('connection_type', 'unknown')
+        st.sidebar.success(f"WebSocket OK ({connection_type}) | Queue: {ws_message_queue.qsize()}")
     else:
         st.sidebar.error("WebSocket disconnected")
     

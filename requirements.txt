@@ -1,0 +1,31 @@
+# Core web framework
+streamlit>=1.28.0
+
+# HTTP client and WebSocket support
+aiohttp>=3.8.5
+websockets>=11.0.3
+websocket-client>=1.6.0
+
+# Data processing and visualization
+pandas>=2.0.3
+numpy>=1.24.3
+plotly>=5.15.0
+matplotlib>=3.7.0
+
+# Configuration and utilities
+pyyaml>=6.0.1
+python-dotenv>=1.0.0
+
+# Cryptographic utilities (for API signing)
+cryptography>=41.0.0
+
+# Async utilities
+asyncio-mqtt>=0.13.0
+
+# Optional: For better performance
+uvloop>=0.17.0; sys_platform != "win32"
+
+# Hyperliquid SDK dependencies
+eth-account>=0.9.0
+eth-utils>=2.2.0
+msgpack>=1.0.5

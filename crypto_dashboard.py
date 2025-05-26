@@ -899,8 +899,21 @@ with tab1:
                 order_book = st.session_state.order_books[instrument]
                 
                 if 'levels' in order_book and len(order_book['levels']) >= 2:
-                    bids = order_book['levels'][0][:10]  # Top 10 bids
-                    asks = order_book['levels'][1][:10]  # Top 10 asks
+                    # Add expandable depth control
+                    expand_key = f"expand_depth_{instrument}"
+                    if expand_key not in st.session_state:
+                        st.session_state[expand_key] = False
+                    
+                    # Determine how many levels to show
+                    if st.session_state[expand_key]:
+                        depth = 20  # Show more levels when expanded
+                        depth_label = "Show Less"
+                    else:
+                        depth = 5   # Show only 5 levels by default
+                        depth_label = "Show More"
+                    
+                    bids = order_book['levels'][0][:depth]
+                    asks = order_book['levels'][1][:depth]
                     
                     # Calculate metrics
                     top_bid = float(bids[0]['px'])
@@ -939,10 +952,20 @@ with tab1:
                     # Vertical order book layout: Asks above, Mid price in between, Bids below
                     
                     # Asks section (top)
-                    st.markdown("**Asks (Sells)**")
+                    ask_col, expand_col = st.columns([4, 1])
+                    with ask_col:
+                        st.markdown("**Asks (Sells)**")
+                    with expand_col:
+                        if st.button(depth_label, key=f"expand_btn_{instrument}"):
+                            st.session_state[expand_key] = not st.session_state[expand_key]
+                            st.rerun()
+                    
                     ask_display = ask_df.copy()
                     ask_display.columns = ['Price', 'Size', 'Orders', 'Total']
                     ask_display = ask_display[['Price', 'Size', 'Total']].iloc[::-1]  # Reverse to show highest first
+                    
+                    # Calculate height based on depth
+                    table_height = min(200, len(ask_display) * 35 + 40)  # 35px per row + header
                     
                     # Display asks with red styling
                     st.dataframe(
@@ -957,19 +980,16 @@ with tab1:
                             'Total': '${:.0f}'
                         }),
                         use_container_width=True,
-                        height=150
+                        height=table_height
                     )
                     
-                    # Mid price section (center)
+                    # Mid price section (center) - Smaller size
                     st.markdown(f"""
                     <div style='background: linear-gradient(90deg, #fbbf24, #f59e0b); 
-                                padding: 10px; border-radius: 6px; margin: 10px 0;
+                                padding: 6px 12px; border-radius: 4px; margin: 8px 0;
                                 text-align: center;'>
-                        <div style='color: #1f2937; font-weight: bold; font-size: 1.2em;'>
-                            Mid Price: ${mid_price:.4f}
-                        </div>
-                        <div style='color: #1f2937; font-size: 0.9em;'>
-                            Spread: {spread_bps:.2f} bps (${spread:.4f})
+                        <div style='color: #1f2937; font-weight: bold; font-size: 1.0em;'>
+                            Mid: ${mid_price:.4f} | Spread: {spread_bps:.2f}bps
                         </div>
                     </div>
                     """, unsafe_allow_html=True)
@@ -993,7 +1013,7 @@ with tab1:
                             'Total': '${:.0f}'
                         }),
                         use_container_width=True,
-                        height=150
+                        height=table_height
                     )
                     
                     # Market Depth visualization

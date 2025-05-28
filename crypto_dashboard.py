@@ -247,117 +247,6 @@ def add_debug_msg(msg):
     
     print(full_msg)
 
-# Alternative WebSocket implementation using websockets library
-async def connect_websocket_async(instruments, ws_state):
-    """Alternative WebSocket connection using websockets library"""
-    add_debug_msg("Starting alternative WebSocket connection using websockets library")
-    
-    try:
-        # Connect to WebSocket
-        add_debug_msg("Connecting to wss://api.hyperliquid.xyz/ws")
-        
-        async with websockets.connect(
-            "wss://api.hyperliquid.xyz/ws",
-            ping_interval=50,
-            ping_timeout=10,
-            close_timeout=10
-        ) as ws:
-            add_debug_msg("Alternative WebSocket connected successfully!")
-            ws_state.mark_connected("websockets")
-            
-            # Subscribe to channels
-            add_debug_msg("Sending subscriptions...")
-            
-            # Subscribe to allMids
-            allmids_sub = {
-                "method": "subscribe",
-                "subscription": {"type": "allMids"}
-            }
-            await ws.send(json.dumps(allmids_sub))
-            add_debug_msg("Subscribed to allMids")
-            await asyncio.sleep(0.1)
-            
-            # Subscribe to instrument-specific channels
-            for instrument in instruments:
-                try:
-                    # L2 Book subscription
-                    book_sub = {
-                        "method": "subscribe",
-                        "subscription": {"type": "l2Book", "coin": instrument}
-                    }
-                    await ws.send(json.dumps(book_sub))
-                    add_debug_msg(f"Subscribed to l2Book for {instrument}")
-                    await asyncio.sleep(0.1)
-                    
-                    # Trades subscription
-                    trades_sub = {
-                        "method": "subscribe",
-                        "subscription": {"type": "trades", "coin": instrument}
-                    }
-                    await ws.send(json.dumps(trades_sub))
-                    add_debug_msg(f"Subscribed to trades for {instrument}")
-                    await asyncio.sleep(0.1)
-                    
-                except Exception as e:
-                    add_debug_msg(f"Error subscribing to {instrument}: {str(e)}")
-            
-            add_debug_msg("All subscriptions sent, listening for messages...")
-            
-            # Listen for messages
-            message_count = 0
-            async for message in ws:
-                try:
-                    message_count += 1
-                    
-                    # Handle connection confirmation
-                    if message == "Websocket connection established.":
-                        add_debug_msg("Received connection establishment confirmation")
-                        continue
-                    
-                    # Update last message time
-                    ws_state.update_last_message_time()
-                    
-                    # Parse JSON message
-                    try:
-                        data = json.loads(message)
-                    except json.JSONDecodeError:
-                        add_debug_msg(f"Non-JSON message: {message[:100]}")
-                        continue
-                    
-                    # Handle pong responses
-                    if data.get('channel') == 'pong':
-                        add_debug_msg("Received pong response")
-                        continue
-                    
-                    # Log first few messages for debugging
-                    if message_count <= 10:
-                        add_debug_msg(f"Message {message_count}: {data.get('channel', 'unknown')} channel")
-                    
-                    # Queue message for processing
-                    try:
-                        ws_message_queue.put(data, block=False)
-                    except queue.Full:
-                        # Clear old messages if queue is full
-                        try:
-                            for _ in range(100):
-                                ws_message_queue.get_nowait()
-                            ws_message_queue.put(data, block=False)
-                            add_debug_msg("Queue was full, cleared old messages")
-                        except:
-                            add_debug_msg("Failed to clear queue, dropping message")
-                
-                except Exception as e:
-                    add_debug_msg(f"Error processing message: {str(e)}")
-            
-    except websockets.exceptions.ConnectionClosed:
-        add_debug_msg("Alternative WebSocket connection closed")
-        ws_state.mark_disconnected()
-    except Exception as e:
-        add_debug_msg(f"Alternative WebSocket error: {str(e)}")
-        add_debug_msg(f"Error type: {type(e).__name__}")
-        add_debug_msg(f"Error details: {repr(e)}")
-        ws_state.mark_disconnected()
-
 def test_simple_websocket():
     """Simple WebSocket test with enhanced debugging"""
     add_debug_msg("Starting enhanced simple WebSocket test...")
@@ -459,121 +348,6 @@ def test_simple_websocket():
     thread.start()
     
     return "Started enhanced simple WebSocket test"
-    """Test WebSocket connection manually with basic async implementation"""
-    import asyncio
-    import websockets
-    import json
-    import time
-    
-    async def test_connection():
-        try:
-            add_debug_msg("Testing manual WebSocket connection...")
-            
-            # Connect with simpler options
-            uri = "wss://api.hyperliquid.xyz/ws"
-            add_debug_msg(f"Connecting to {uri}")
-            
-            async with websockets.connect(uri, ping_interval=None) as websocket:
-                add_debug_msg("Manual WebSocket connected!")
-                
-                # Send a simple subscription
-                subscription = {
-                    "method": "subscribe",
-                    "subscription": {"type": "allMids"}
-                }
-                
-                await websocket.send(json.dumps(subscription))
-                add_debug_msg("Sent allMids subscription")
-                
-                # Listen for a few messages
-                for i in range(5):
-                    try:
-                        message = await asyncio.wait_for(websocket.recv(), timeout=10.0)
-                        add_debug_msg(f"Received message {i+1}: {message[:100]}")
-                        
-                        # Parse and queue the message
-                        if message != "Websocket connection established.":
-                            try:
-                                data = json.loads(message)
-                                ws_message_queue.put(data, block=False)
-                                add_debug_msg("Queued message for processing")
-                            except:
-                                pass
-                                
-                    except asyncio.TimeoutError:
-                        add_debug_msg(f"Timeout waiting for message {i+1}")
-                        break
-                        
-        except Exception as e:
-            add_debug_msg(f"Manual WebSocket test error: {str(e)}")
-    
-    def run_test():
-        try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(test_connection())
-        except Exception as e:
-            add_debug_msg(f"Manual test thread error: {str(e)}")
-        finally:
-            try:
-                loop.close()
-            except:
-                pass
-    
-    # Run in background thread
-    thread = threading.Thread(target=run_test, daemon=True)
-    thread.start()
-    return "Started manual WebSocket test"
-    """Run alternative WebSocket in a separate thread"""
-    thread_id = threading.get_ident()
-    add_debug_msg(f"Alternative WebSocket thread {thread_id} started")
-    
-    reconnect_delay = 5
-    max_reconnect_delay = 60
-    
-    while ws_state.should_run:
-        try:
-            add_debug_msg("Creating new event loop for alternative WebSocket")
-            
-            # Create new event loop for this thread
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            
-            add_debug_msg("Starting alternative WebSocket connection...")
-            loop.run_until_complete(connect_websocket_async(instruments, ws_state))
-            
-            # If we reach here, the connection ended
-            add_debug_msg("Alternative WebSocket connection ended")
-            
-            if not ws_state.should_run:
-                add_debug_msg("Alternative WebSocket thread told to stop, exiting")
-                break
-                
-            # Wait before reconnecting
-            add_debug_msg(f"Will reconnect alternative WebSocket in {reconnect_delay} seconds")
-            time.sleep(reconnect_delay)
-            
-            # Exponential backoff
-            reconnect_delay = min(reconnect_delay * 1.5, max_reconnect_delay)
-            
-        except Exception as e:
-            add_debug_msg(f"Alternative WebSocket thread error: {str(e)}")
-            add_debug_msg(traceback.format_exc())
-            
-            if not ws_state.should_run:
-                break
-                
-            # Wait before retrying
-            add_debug_msg(f"Error occurred, will retry alternative WebSocket in {reconnect_delay} seconds")
-            time.sleep(reconnect_delay)
-            reconnect_delay = min(reconnect_delay * 2, max_reconnect_delay)
-        finally:
-            try:
-                loop.close()
-            except:
-                pass
-    
-    add_debug_msg(f"Alternative WebSocket thread {thread_id} ended")
 
 # Original WebSocket implementation with enhanced debugging
 class HyperliquidWebSocketManager:
@@ -1121,27 +895,25 @@ with tab1:
     
     for i, instrument in enumerate(instruments):
         with cols[i]:
-            st.subheader(f"{instrument} Order Book")
-            
             if instrument in st.session_state.order_books:
                 order_book = st.session_state.order_books[instrument]
                 
                 if 'levels' in order_book and len(order_book['levels']) >= 2:
-                    bids = order_book['levels'][0][:5]
-                    asks = order_book['levels'][1][:5]
+                    # Add expandable depth control
+                    expand_key = f"expand_depth_{instrument}"
+                    if expand_key not in st.session_state:
+                        st.session_state[expand_key] = False
                     
-                    # Create dataframes
-                    bid_df = pd.DataFrame(bids)
-                    bid_df['px'] = pd.to_numeric(bid_df['px'])
-                    bid_df['sz'] = pd.to_numeric(bid_df['sz'])
-                    bid_df['total'] = bid_df['px'] * bid_df['sz']
-                    bid_df.columns = ['Price', 'Size', 'Orders', 'Value']
+                    # Determine how many levels to show
+                    if st.session_state[expand_key]:
+                        depth = 20  # Show more levels when expanded
+                        depth_label = "Show Less"
+                    else:
+                        depth = 5   # Show only 5 levels by default
+                        depth_label = "Show More"
                     
-                    ask_df = pd.DataFrame(asks)
-                    ask_df['px'] = pd.to_numeric(ask_df['px'])
-                    ask_df['sz'] = pd.to_numeric(ask_df['sz'])
-                    ask_df['total'] = ask_df['px'] * ask_df['sz']
-                    ask_df.columns = ['Price', 'Size', 'Orders', 'Value']
+                    bids = order_book['levels'][0][:depth]
+                    asks = order_book['levels'][1][:depth]
                     
                     # Calculate metrics
                     top_bid = float(bids[0]['px'])
@@ -1151,13 +923,13 @@ with tab1:
                     spread_bps = (spread / mid_price) * 10000
                     
                     # Create enhanced dataframes
-                    bid_df = pd.DataFrame(bids[:10])
+                    bid_df = pd.DataFrame(bids)
                     bid_df['px'] = pd.to_numeric(bid_df['px'])
                     bid_df['sz'] = pd.to_numeric(bid_df['sz'])
                     bid_df['total'] = bid_df['px'] * bid_df['sz']
                     bid_df = bid_df.sort_values('px', ascending=False)  # Highest bid first
                     
-                    ask_df = pd.DataFrame(asks[:10])
+                    ask_df = pd.DataFrame(asks)
                     ask_df['px'] = pd.to_numeric(ask_df['px'])
                     ask_df['sz'] = pd.to_numeric(ask_df['sz'])
                     ask_df['total'] = ask_df['px'] * ask_df['sz']
@@ -1177,58 +949,127 @@ with tab1:
                     </div>
                     """, unsafe_allow_html=True)
                     
-                    # Create styled order book using streamlit dataframes with color coding
-                    col1, col2 = st.columns([1, 1])
+                    # Vertical order book layout: Asks above, Mid price in between, Bids below
                     
-                    with col1:
+                    # Asks section (top)
+                    ask_col, expand_col = st.columns([4, 1])
+                    with ask_col:
                         st.markdown("**Asks (Sells)**")
-                        
-                        # Style asks with red background gradient
-                        ask_display = ask_df.copy()
-                        ask_display.columns = ['Price', 'Size', 'Orders', 'Total']
-                        ask_display = ask_display[['Price', 'Size', 'Total']].iloc[::-1]  # Reverse to show highest first
-                        
-                        # Display asks
-                        st.dataframe(
-                            ask_display.style.background_gradient(
-                                subset=['Size'], 
-                                cmap='Reds', 
-                                vmin=0, 
-                                vmax=ask_display['Size'].max()
-                            ).format({
-                                'Price': '${:.4f}',
-                                'Size': '{:.1f}',
-                                'Total': '${:.0f}'
-                            }),
-                            use_container_width=True,
-                            height=200
-                        )
+                    with expand_col:
+                        if st.button(depth_label, key=f"expand_btn_{instrument}"):
+                            st.session_state[expand_key] = not st.session_state[expand_key]
+                            st.rerun()
                     
-                    with col2:
-                        st.markdown("**Bids (Buys)**")
-                        
-                        # Style bids with green background gradient
-                        bid_display = bid_df.copy()
-                        bid_display.columns = ['Price', 'Size', 'Orders', 'Total']
-                        bid_display = bid_display[['Price', 'Size', 'Total']]
-                        
-                        # Display bids
-                        st.dataframe(
-                            bid_display.style.background_gradient(
-                                subset=['Size'], 
-                                cmap='Greens', 
-                                vmin=0, 
-                                vmax=bid_display['Size'].max()
-                            ).format({
-                                'Price': '${:.4f}',
-                                'Size': '{:.1f}',
-                                'Total': '${:.0f}'
-                            }),
-                            use_container_width=True,
-                            height=200
-                        )
+                    ask_display = ask_df.copy()
+                    ask_display.columns = ['Price', 'Size', 'Orders', 'Total']
+                    ask_display = ask_display[['Price', 'Size', 'Total']].iloc[::-1]  # Reverse to show highest first
                     
-                    # Compact bar chart visualization
+                    # Calculate height based on depth
+                    table_height = min(200, len(ask_display) * 35 + 40)  # 35px per row + header
+                    
+                    # Display asks with red styling
+                    st.dataframe(
+                        ask_display.style.background_gradient(
+                            subset=['Size'], 
+                            cmap='Reds', 
+                            vmin=0, 
+                            vmax=ask_display['Size'].max()
+                        ).format({
+                            'Price': '${:.4f}',
+                            'Size': '{:.1f}',
+                            'Total': '${:.0f}'
+                        }),
+                        use_container_width=True,
+                        height=table_height
+                    )
+                    
+                    # Mid price section (center) - Smaller size
+                    st.markdown(f"""
+                    <div style='background: linear-gradient(90deg, #fbbf24, #f59e0b); 
+                                padding: 6px 12px; border-radius: 4px; margin: 8px 0;
+                                text-align: center;'>
+                        <div style='color: #1f2937; font-weight: bold; font-size: 1.0em;'>
+                            Mid: ${mid_price:.4f} | Spread: {spread_bps:.2f}bps
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    
+                    # Bids section (bottom)
+                    st.markdown("**Bids (Buys)**")
+                    bid_display = bid_df.copy()
+                    bid_display.columns = ['Price', 'Size', 'Orders', 'Total']
+                    bid_display = bid_display[['Price', 'Size', 'Total']]
+                    
+                    # Display bids with green styling
+                    st.dataframe(
+                        bid_display.style.background_gradient(
+                            subset=['Size'], 
+                            cmap='Greens', 
+                            vmin=0, 
+                            vmax=bid_display['Size'].max()
+                        ).format({
+                            'Price': '${:.4f}',
+                            'Size': '{:.1f}',
+                            'Total': '${:.0f}'
+                        }),
+                        use_container_width=True,
+                        height=table_height
+                    )
+                    
+                    # Market Depth visualization with sentiment analysis
+                    
+                    # Calculate sentiment based on order book depth
+                    total_bid_volume = bid_df['sz'].sum()
+                    total_ask_volume = ask_df['sz'].sum()
+                    total_bid_value = bid_df['total'].sum()
+                    total_ask_value = ask_df['total'].sum()
+                    
+                    # Calculate bid/ask ratio for sentiment
+                    if total_ask_volume > 0:
+                        volume_ratio = total_bid_volume / total_ask_volume
+                    else:
+                        volume_ratio = float('inf')
+                    
+                    if total_ask_value > 0:
+                        value_ratio = total_bid_value / total_ask_value
+                    else:
+                        value_ratio = float('inf')
+                    
+                    # Determine sentiment based on ratios
+                    avg_ratio = (volume_ratio + value_ratio) / 2
+                    
+                    if avg_ratio > 1.2:
+                        sentiment = "🟢 Bullish"
+                        sentiment_color = "#22c55e"
+                        sentiment_desc = f"Strong bid support ({avg_ratio:.1f}x)"
+                    elif avg_ratio > 1.05:
+                        sentiment = "🟡 Slightly Bullish"
+                        sentiment_color = "#eab308"
+                        sentiment_desc = f"Bid leaning ({avg_ratio:.1f}x)"
+                    elif avg_ratio < 0.8:
+                        sentiment = "🔴 Bearish"
+                        sentiment_color = "#ef4444"
+                        sentiment_desc = f"Heavy ask pressure ({avg_ratio:.1f}x)"
+                    elif avg_ratio < 0.95:
+                        sentiment = "🟠 Slightly Bearish"
+                        sentiment_color = "#f97316"
+                        sentiment_desc = f"Ask leaning ({avg_ratio:.1f}x)"
+                    else:
+                        sentiment = "⚪ Neutral"
+                        sentiment_color = "#6b7280"
+                        sentiment_desc = f"Balanced ({avg_ratio:.1f}x)"
+                    
+                    # Header with asset name and sentiment
+                    st.markdown(f"""
+                    <div style='display: flex; justify-content: space-between; align-items: center; margin: 10px 0 5px 0;'>
+                        <h4 style='color: #f3f4f6; margin: 0; font-size: 1.1em;'>{instrument} Market Depth</h4>
+                        <div style='text-align: right;'>
+                            <div style='color: {sentiment_color}; font-weight: bold; font-size: 0.95em;'>{sentiment}</div>
+                            <div style='color: #9ca3af; font-size: 0.8em;'>{sentiment_desc}</div>
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    
                     fig = go.Figure()
                     
                     # Add asks (red bars)
@@ -1237,7 +1078,9 @@ with tab1:
                         y=ask_df['sz'],
                         name='Asks',
                         marker_color='rgba(239, 68, 68, 0.8)',
-                        opacity=0.8
+                        opacity=0.8,
+                        hovertemplate='<b>Ask</b><br>Price: $%{x:.4f}<br>Size: %{y:.2f}<br>Value: $%{customdata:,.0f}<extra></extra>',
+                        customdata=ask_df['total']
                     ))
                     
                     # Add bids (green bars)
@@ -1246,25 +1089,33 @@ with tab1:
                         y=bid_df['sz'],
                         name='Bids',
                         marker_color='rgba(34, 197, 94, 0.8)',
-                        opacity=0.8
+                        opacity=0.8,
+                        hovertemplate='<b>Bid</b><br>Price: $%{x:.4f}<br>Size: %{y:.2f}<br>Value: $%{customdata:,.0f}<extra></extra>',
+                        customdata=bid_df['total']
                     ))
                     
                     # Add mid price line
                     fig.add_vline(
                         x=mid_price,
                         line=dict(color='#f59e0b', width=2, dash='dash'),
-                        annotation_text=f"Mid: ${mid_price:.4f}"
+                        annotation=dict(
+                            text=f"Mid: ${mid_price:.4f}",
+                            bgcolor='#f59e0b',
+                            bordercolor='#f59e0b',
+                            font=dict(color='#1f2937')
+                        )
                     )
                     
                     fig.update_layout(
-                        title=None,  # Remove title to save space
-                        xaxis_title="Price",
+                        title=None,
+                        xaxis_title="Price ($)",
                         yaxis_title="Size",
                         barmode='group',
-                        height=250,  # Smaller height
+                        height=250,
                         template="plotly_dark",
-                        showlegend=False,  # Remove legend to save space
-                        margin=dict(l=0, r=0, t=20, b=0)
+                        showlegend=False,
+                        margin=dict(l=0, r=0, t=10, b=0),
+                        hovermode='x unified'
                     )
                     
                     st.plotly_chart(fig, use_container_width=True)

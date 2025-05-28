@@ -82,6 +82,10 @@ def initialize_session_state():
         st.session_state.trade_stats = {'by_instrument': {}, 'by_side': {}, 'hourly': {}}
     if 'connection_history' not in st.session_state:
         st.session_state.connection_history = []
+    if 'selected_instruments' not in st.session_state:
+        st.session_state.selected_instruments = ["BTC", "ETH", "SOL"]
+    if 'trade_threshold' not in st.session_state:
+        st.session_state.trade_threshold = 1000
 
 initialize_session_state()
 
@@ -715,6 +719,122 @@ def render_enhanced_trade_table(trades_df, max_rows=100):
                 use_container_width=True
             )
 
+def render_order_book_widget(instrument, order_book_data):
+    """Render a compact order book widget"""
+    if not order_book_data or 'levels' not in order_book_data or len(order_book_data['levels']) < 2:
+        st.warning(f"No order book data for {instrument}")
+        return
+    
+    bids = order_book_data['levels'][0][:5]  # Top 5 bids
+    asks = order_book_data['levels'][1][:5]  # Top 5 asks
+    
+    if not bids or not asks:
+        st.warning(f"Incomplete order book data for {instrument}")
+        return
+    
+    # Calculate mid price and spread
+    top_bid = float(bids[0]['px'])
+    top_ask = float(asks[0]['px'])
+    mid_price = (top_bid + top_ask) / 2
+    spread = top_ask - top_bid
+    spread_bps = (spread / mid_price) * 10000
+    
+    # Header with key metrics
+    st.markdown(f"""
+    <div style='background: #1f2937; padding: 8px 15px; border-radius: 6px; margin: 5px 0;
+                display: flex; justify-content: space-between; align-items: center;'>
+        <h4 style='color: #f3f4f6; margin: 0; font-size: 1.1em;'>{instrument}</h4>
+        <div style='color: #9ca3af; font-size: 0.85em;'>
+            <span style='color: #22c55e;'>Bid: ${top_bid:.4f}</span> | 
+            <span style='color: #ef4444;'>Ask: ${top_ask:.4f}</span> | 
+            <span style='color: #f59e0b;'>Spread: {spread_bps:.2f}bps</span>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # Create side-by-side order book
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.markdown("**🔴 Asks (Sells)**")
+        ask_df = pd.DataFrame(asks[::-1])  # Reverse to show highest first
+        ask_df['px'] = pd.to_numeric(ask_df['px'])
+        ask_df['sz'] = pd.to_numeric(ask_df['sz'])
+        ask_df['total'] = ask_df['px'] * ask_df['sz']
+        
+        ask_display = ask_df[['px', 'sz', 'total']].copy()
+        ask_display.columns = ['Price', 'Size', 'Total']
+        
+        st.dataframe(
+            ask_display.style.format({
+                'Price': '${:.4f}',
+                'Size': '{:.1f}',
+                'Total': '${:.0f}'
+            }).background_gradient(subset=['Size'], cmap='Reds', vmin=0),
+            use_container_width=True,
+            height=200,
+            hide_index=True
+        )
+    
+    with col2:
+        st.markdown("**🟢 Bids (Buys)**")
+        bid_df = pd.DataFrame(bids)
+        bid_df['px'] = pd.to_numeric(bid_df['px'])
+        bid_df['sz'] = pd.to_numeric(bid_df['sz'])
+        bid_df['total'] = bid_df['px'] * bid_df['sz']
+        
+        bid_display = bid_df[['px', 'sz', 'total']].copy()
+        bid_display.columns = ['Price', 'Size', 'Total']
+        
+        st.dataframe(
+            bid_display.style.format({
+                'Price': '${:.4f}',
+                'Size': '{:.1f}',
+                'Total': '${:.0f}'
+            }).background_gradient(subset=['Size'], cmap='Greens', vmin=0),
+            use_container_width=True,
+            height=200,
+            hide_index=True
+        )
+
+def render_funding_rate_widget(instrument, funding_data):
+    """Render a compact funding rate widget"""
+    if not funding_data:
+        st.warning(f"No funding data for {instrument}")
+        return
+    
+    rate = funding_data['rate']
+    annualized = rate * 3 * 365 * 100  # 3 funding events per day
+    next_funding = datetime.fromtimestamp(funding_data['next_funding_time'])
+    time_to_next = (next_funding - datetime.now()).total_seconds() / 3600
+    
+    # Color coding based on rate
+    rate_color = "#22c55e" if rate > 0 else "#ef4444" if rate < 0 else "#9ca3af"
+    
+    st.markdown(f"""
+    <div style='background: #1f2937; padding: 12px 15px; border-radius: 6px; margin: 5px 0;'>
+        <h4 style='color: #f3f4f6; margin: 0 0 8px 0; font-size: 1.1em;'>{instrument} Funding</h4>
+        <div style='display: grid; grid-template-columns: 1fr 1fr; gap: 15px; font-size: 0.9em;'>
+            <div>
+                <div style='color: #9ca3af; margin-bottom: 4px;'>Current Rate</div>
+                <div style='color: {rate_color}; font-weight: bold; font-size: 1.1em;'>{rate:.6f}%</div>
+            </div>
+            <div>
+                <div style='color: #9ca3af; margin-bottom: 4px;'>Annualized</div>
+                <div style='color: {rate_color}; font-weight: bold; font-size: 1.1em;'>{annualized:.2f}%</div>
+            </div>
+            <div>
+                <div style='color: #9ca3af; margin-bottom: 4px;'>Next Funding</div>
+                <div style='color: #f3f4f6;'>{next_funding.strftime('%H:%M:%S')}</div>
+            </div>
+            <div>
+                <div style='color: #9ca3af; margin-bottom: 4px;'>Time Remaining</div>
+                <div style='color: #f3f4f6;'>{time_to_next:.1f}h</div>
+            </div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
 # Main Application Layout
 st.title("🚀 Crypto Arbitrage Dashboard")
 st.markdown("**Real-time monitoring of order books, funding rates, and large trades from Hyperliquid**")
@@ -724,4 +844,384 @@ st.sidebar.title("⚙️ Dashboard Controls")
 
 # Instrument selection with better organization
 st.sidebar.subheader("🎯 Instruments")
-available_instruments = ["BTC", "ETH", "SOL", "AVAX", "
+available_instruments = ["BTC", "ETH", "SOL", "AVAX", "LINK", "DOGE", "ARB", "OP", "MATIC", "UNI"]
+st.session_state.selected_instruments = st.sidebar.multiselect(
+    "Select instruments to monitor",
+    available_instruments,
+    default=st.session_state.selected_instruments,
+    help="Choose which cryptocurrency perpetual futures to monitor"
+)
+
+# Trade threshold setting
+st.sidebar.subheader("📊 Trade Settings")
+st.session_state.trade_threshold = st.sidebar.slider(
+    "Trade Threshold ($)",
+    min_value=100,
+    max_value=100000,
+    value=st.session_state.trade_threshold,
+    step=500,
+    help="Only show trades larger than this amount"
+)
+
+# Auto-refresh settings
+st.sidebar.subheader("🔄 Refresh Settings")
+auto_refresh = st.sidebar.checkbox("Auto-refresh dashboard", value=True)
+refresh_interval = st.sidebar.slider(
+    "Refresh interval (seconds)",
+    min_value=1,
+    max_value=30,
+    value=5,
+    help="How often to refresh the dashboard"
+)
+
+# Connection status
+render_connection_status()
+
+# Debug toggle
+show_debug = st.sidebar.checkbox("Show debug info", value=False)
+
+# Clear data button
+if st.sidebar.button("🗑️ Clear All Data", type="secondary"):
+    st.session_state.trades = []
+    st.session_state.order_books = {}
+    st.session_state.latest_prices = {}
+    st.session_state.debug_messages = []
+    st.session_state.trade_stats = {'by_instrument': {}, 'by_side': {}, 'hourly': {}}
+    add_debug_message("🗑️ All data cleared by user")
+    st.rerun()
+
+# Main content area
+if not st.session_state.selected_instruments:
+    st.warning("⚠️ Please select at least one instrument from the sidebar to begin monitoring.")
+    st.stop()
+
+# Create tabs for different views
+tab1, tab2, tab3, tab4 = st.tabs(["📊 Order Books", "💰 Funding Rates", "📈 Live Trades", "🔧 Debug"])
+
+# Tab 1: Order Books
+with tab1:
+    st.header("📊 Real-time Order Books")
+    
+    # Update button and status
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        st.write(f"Monitoring {len(st.session_state.selected_instruments)} instruments")
+    with col2:
+        if st.button("🔄 Refresh", key="refresh_orderbooks"):
+            # Force refresh order books via REST API
+            for instrument in st.session_state.selected_instruments:
+                order_book = get_order_book(instrument)
+                if order_book:
+                    st.session_state.order_books[instrument] = order_book
+            st.success("Order books refreshed!")
+    
+    # Display order books in a grid
+    if len(st.session_state.selected_instruments) <= 3:
+        columns = st.columns(len(st.session_state.selected_instruments))
+        for i, instrument in enumerate(st.session_state.selected_instruments):
+            with columns[i]:
+                order_book_data = st.session_state.order_books.get(instrument)
+                render_order_book_widget(instrument, order_book_data)
+    else:
+        # For more than 3 instruments, use a 2-column layout
+        col1, col2 = st.columns(2)
+        for i, instrument in enumerate(st.session_state.selected_instruments):
+            with col1 if i % 2 == 0 else col2:
+                order_book_data = st.session_state.order_books.get(instrument)
+                render_order_book_widget(instrument, order_book_data)
+
+# Tab 2: Funding Rates
+with tab2:
+    st.header("💰 Funding Rate Analysis")
+    
+    # Update button
+    if st.button("🔄 Refresh Funding Rates", key="refresh_funding"):
+        funding_data = []
+        for instrument in st.session_state.selected_instruments:
+            funding = get_funding_rate(instrument)
+            if funding:
+                st.session_state.funding_rates[instrument] = funding
+        st.success("Funding rates refreshed!")
+    
+    # Display funding rates
+    if len(st.session_state.selected_instruments) <= 2:
+        columns = st.columns(len(st.session_state.selected_instruments))
+        for i, instrument in enumerate(st.session_state.selected_instruments):
+            with columns[i]:
+                funding_data = st.session_state.funding_rates.get(instrument)
+                render_funding_rate_widget(instrument, funding_data)
+    else:
+        col1, col2 = st.columns(2)
+        for i, instrument in enumerate(st.session_state.selected_instruments):
+            with col1 if i % 2 == 0 else col2:
+                funding_data = st.session_state.funding_rates.get(instrument)
+                render_funding_rate_widget(instrument, funding_data)
+    
+    # Funding rate comparison chart
+    if st.session_state.funding_rates:
+        st.subheader("📊 Funding Rate Comparison")
+        
+        # Prepare data for chart
+        chart_data = []
+        for instrument, data in st.session_state.funding_rates.items():
+            if instrument in st.session_state.selected_instruments:
+                chart_data.append({
+                    'Instrument': instrument,
+                    'Rate (%)': data['rate'] * 100,
+                    'Annualized (%)': data['rate'] * 3 * 365 * 100
+                })
+        
+        if chart_data:
+            chart_df = pd.DataFrame(chart_data)
+            
+            fig = go.Figure()
+            fig.add_trace(go.Bar(
+                x=chart_df['Instrument'],
+                y=chart_df['Annualized (%)'],
+                name='Annualized Funding Rate',
+                marker_color=px.colors.qualitative.Set3
+            ))
+            
+            fig.update_layout(
+                title="Annualized Funding Rates by Instrument",
+                xaxis_title="Instrument",
+                yaxis_title="Annualized Rate (%)",
+                height=400,
+                template="plotly_dark"
+            )
+            
+            st.plotly_chart(fig, use_container_width=True)
+
+# Tab 3: Live Trades
+with tab3:
+    st.header("📈 Live Trade Monitor")
+    
+    # Trade metrics
+    render_trade_metrics()
+    
+    # Processing status
+    processing_result = process_websocket_messages()
+    
+    if processing_result['processed_count'] > 0:
+        st.success(f"✅ {processing_result['summary']}")
+    elif st.session_state.ws_state.connected:
+        st.info("🔄 Connected and waiting for trade data...")
+    else:
+        st.warning("⚠️ Not connected to live data feed. Click 'Connect' in the sidebar.")
+    
+    # Trade table
+    trades_df = pd.DataFrame(st.session_state.trades) if st.session_state.trades else pd.DataFrame()
+    
+    if not trades_df.empty:
+        st.subheader(f"Recent Large Trades (>${st.session_state.trade_threshold:,}+)")
+        render_enhanced_trade_table(trades_df)
+        
+        # Trade visualizations
+        if len(trades_df) >= 5:
+            st.subheader("📊 Trade Visualizations")
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                # Volume by instrument pie chart
+                instrument_volume = trades_df.groupby('instrument')['notional'].sum().reset_index()
+                
+                fig = go.Figure(data=[go.Pie(
+                    labels=instrument_volume['instrument'],
+                    values=instrument_volume['notional'],
+                    hole=0.3,
+                    title="Volume Distribution by Instrument"
+                )])
+                
+                fig.update_layout(height=400, template="plotly_dark")
+                st.plotly_chart(fig, use_container_width=True)
+            
+            with col2:
+                # Buy vs Sell volume
+                side_volume = trades_df.groupby('side')['notional'].sum().reset_index()
+                
+                colors = ['#22c55e' if side == 'Buy' else '#ef4444' for side in side_volume['side']]
+                
+                fig = go.Figure(data=[go.Pie(
+                    labels=side_volume['side'],
+                    values=side_volume['notional'],
+                    hole=0.3,
+                    marker_colors=colors,
+                    title="Buy vs Sell Volume"
+                )])
+                
+                fig.update_layout(height=400, template="plotly_dark")
+                st.plotly_chart(fig, use_container_width=True)
+            
+            # Trade timeline
+            if len(trades_df) >= 10:
+                st.subheader("⏰ Trade Timeline")
+                
+                # Resample trades by minute for better visualization
+                trades_df_copy = trades_df.copy()
+                trades_df_copy.set_index('time', inplace=True)
+                
+                # Group by 1-minute intervals
+                timeline_data = trades_df_copy.resample('1T').agg({
+                    'notional': 'sum',
+                    'instrument': 'count'
+                }).reset_index()
+                
+                timeline_data = timeline_data[timeline_data['notional'] > 0]  # Remove empty intervals
+                
+                if not timeline_data.empty:
+                    fig = make_subplots(
+                        rows=2, cols=1,
+                        subplot_titles=('Trade Volume Over Time', 'Trade Count Over Time'),
+                        vertical_spacing=0.1
+                    )
+                    
+                    # Volume timeline
+                    fig.add_trace(
+                        go.Scatter(
+                            x=timeline_data['time'],
+                            y=timeline_data['notional'],
+                            mode='lines+markers',
+                            name='Volume ($)',
+                            line=dict(color='#3b82f6', width=2)
+                        ),
+                        row=1, col=1
+                    )
+                    
+                    # Count timeline
+                    fig.add_trace(
+                        go.Bar(
+                            x=timeline_data['time'],
+                            y=timeline_data['instrument'],
+                            name='Trade Count',
+                            marker_color='#10b981'
+                        ),
+                        row=2, col=1
+                    )
+                    
+                    fig.update_layout(
+                        height=500,
+                        template="plotly_dark",
+                        showlegend=False
+                    )
+                    
+                    fig.update_xaxes(title_text="Time", row=2, col=1)
+                    fig.update_yaxes(title_text="Volume ($)", row=1, col=1)
+                    fig.update_yaxes(title_text="Count", row=2, col=1)
+                    
+                    st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info(f"🔍 No trades above ${st.session_state.trade_threshold:,} threshold yet. Lower the threshold or wait for larger trades.")
+
+# Tab 4: Debug
+with tab4:
+    st.header("🔧 Debug Information")
+    
+    if show_debug:
+        # WebSocket state details
+        st.subheader("🔗 WebSocket State")
+        
+        status = st.session_state.ws_state
+        debug_cols = st.columns(4)
+        
+        with debug_cols[0]:
+            st.metric("Connected", "✅ Yes" if status.connected else "❌ No")
+            st.metric("Session ID", status.session_id)
+        
+        with debug_cols[1]:
+            st.metric("Messages", f"{status.message_count:,}")
+            st.metric("Trades", f"{status.trade_count:,}")
+        
+        with debug_cols[2]:
+            st.metric("Order Books", f"{status.orderbook_count:,}")
+            st.metric("Queue Size", f"{st.session_state.message_queue.qsize():,}")
+        
+        with debug_cols[3]:
+            if status.connection_start_time > 0:
+                uptime = time.time() - status.connection_start_time
+                st.metric("Uptime", f"{uptime:.0f}s")
+            else:
+                st.metric("Uptime", "N/A")
+            
+            st.metric("Total Volume", f"${status.total_volume:,.0f}")
+        
+        # Connection history
+        if st.session_state.connection_history:
+            st.subheader("📜 Connection History")
+            history_df = pd.DataFrame(st.session_state.connection_history)
+            history_df['time'] = history_df['time'].dt.strftime('%H:%M:%S')
+            
+            # Color code events
+            def color_event(event):
+                if event == 'connect':
+                    return 'background-color: #22c55e30'
+                elif event == 'disconnect':
+                    return 'background-color: #ef444430'
+                else:
+                    return ''
+            
+            styled_history = history_df.style.applymap(color_event, subset=['event'])
+            st.dataframe(styled_history, use_container_width=True)
+        
+        # Debug messages
+        st.subheader("🐛 Debug Messages")
+        
+        col1, col2 = st.columns([4, 1])
+        
+        with col1:
+            if st.session_state.debug_messages:
+                # Show latest 50 messages
+                recent_messages = st.session_state.debug_messages[-50:]
+                st.code('\n'.join(reversed(recent_messages)))
+            else:
+                st.info("No debug messages yet")
+        
+        with col2:
+            if st.button("🔄 Refresh Debug", key="refresh_debug"):
+                st.rerun()
+            
+            if st.button("🧹 Clear Messages", key="clear_debug"):
+                st.session_state.debug_messages = []
+                st.success("Debug messages cleared")
+        
+        # Trade statistics
+        st.subheader("📊 Trade Statistics")
+        
+        if st.session_state.trade_stats['by_instrument']:
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.write("**By Instrument:**")
+                instrument_stats = pd.DataFrame.from_dict(
+                    st.session_state.trade_stats['by_instrument'], 
+                    orient='index'
+                ).reset_index()
+                instrument_stats.columns = ['Instrument', 'Count', 'Volume']
+                instrument_stats['Volume'] = instrument_stats['Volume'].apply(lambda x: f"${x:,.0f}")
+                st.dataframe(instrument_stats, use_container_width=True)
+            
+            with col2:
+                st.write("**By Side:**")
+                side_stats = pd.DataFrame.from_dict(
+                    st.session_state.trade_stats['by_side'], 
+                    orient='index'
+                ).reset_index()
+                side_stats.columns = ['Side', 'Count', 'Volume']
+                side_stats['Volume'] = side_stats['Volume'].apply(lambda x: f"${x:,.0f}")
+                st.dataframe(side_stats, use_container_width=True)
+    else:
+        st.info("Enable 'Show debug info' in the sidebar to view detailed debug information.")
+
+# Auto-start WebSocket connection if not connected
+if not st.session_state.ws_state.connected and not st.session_state.ws_state.thread:
+    add_debug_message("🚀 Auto-starting WebSocket connection")
+    start_websocket_thread()
+
+# Auto-refresh logic
+if auto_refresh:
+    # Process any pending WebSocket messages
+    process_websocket_messages()
+    
+    # Sleep and refresh
+    time.sleep(refresh_interval)
+    st.rerun()

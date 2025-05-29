@@ -21,6 +21,10 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import plotly.graph_objects as go
+from pathlib import Path
+
+# Add the parent directory to the path so we can import hyperliquid
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 # Set page configuration
 st.set_page_config(
@@ -30,151 +34,61 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# Simple HTTP client for Hyperliquid API
-class SimpleHyperliquidClient:
-    """Simple HTTP client for Hyperliquid API endpoints"""
-    
-    def __init__(self):
-        self.base_url = "https://api.hyperliquid.xyz"
-        self.session = requests.Session()
-        self.session.headers.update({"Content-Type": "application/json"})
-    
-    def l2_snapshot(self, coin: str):
-        """Get L2 order book snapshot"""
-        try:
-            response = self.session.post(
-                f"{self.base_url}/info",
-                json={"type": "l2Book", "coin": coin},
-                timeout=10
-            )
-            response.raise_for_status()
-            return response.json()
-        except Exception as e:
-            st.error(f"Error fetching order book for {coin}: {str(e)}")
-            return None
-    
-    def funding_history(self, coin: str, start_time: int, end_time: int):
-        """Get funding history for a coin"""
-        try:
-            response = self.session.post(
-                f"{self.base_url}/info",
-                json={
-                    "type": "fundingHistory",
-                    "coin": coin,
-                    "startTime": start_time,
-                    "endTime": end_time
-                },
-                timeout=10
-            )
-            response.raise_for_status()
-            return response.json()
-        except Exception as e:
-            st.error(f"Error fetching funding history for {coin}: {str(e)}")
-            return []
-    
-    def all_mids(self):
-        """Get all mid prices"""
-        try:
-            response = self.session.post(
-                f"{self.base_url}/info",
-                json={"type": "allMids"},
-                timeout=10
-            )
-            response.raise_for_status()
-            return response.json()
-        except Exception as e:
-            st.error(f"Error fetching mid prices: {str(e)}")
-            return {}
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# Create thread-safe queues
-ws_message_queue = queue.Queue(maxsize=10000)
-debug_message_queue = queue.Queue(maxsize=1000)
+# Import hyperliquid after adding to path
+try:
+    from hyperliquid.info import Info
+    from hyperliquid.utils.types import Subscription
+except ImportError as e:
+    st.error(f"Could not import Hyperliquid. Error: {str(e)}")
+    st.error("Make sure the hyperliquid package is available in the path.")
+    st.stop()
 
-# Thread-safe WebSocket state manager
-class WebSocketState:
-    """Thread-safe WebSocket state manager"""
+# Global queues for thread-safe communication
+ws_message_queue = queue.Queue(maxsize=1000)
+debug_message_queue = queue.Queue(maxsize=500)
+
+class DashboardState:
+    """Centralized state management for the dashboard"""
     def __init__(self):
-        self.connected = False
+        self.ws_connected = False
         self.last_message_time = 0
-        self.last_ping_time = 0
-        self.thread = None
-        self.ws_instance = None
-        self.session_id = str(uuid.uuid4())[:8]
-        self.reconnect_attempt = 0
-        self.lock = threading.Lock()
+        self.connection_thread = None
+        self.info_client = None
+        self.session_id = None
         self.should_run = True
-        self.subscriptions = {}
-        self.connection_type = "none"  # Track which connection type is active
+        self._lock = threading.Lock()
     
-    def mark_connected(self, connection_type="websocket-client"):
-        with self.lock:
-            self.connected = True
+    def mark_connected(self):
+        with self._lock:
+            self.ws_connected = True
             self.last_message_time = time.time()
-            self.connection_type = connection_type
-            return self.connected
     
     def mark_disconnected(self):
-        with self.lock:
-            self.connected = False
-            self.connection_type = "none"
-            return self.connected
+        with self._lock:
+            self.ws_connected = False
     
-    def update_last_message_time(self):
-        with self.lock:
+    def update_message_time(self):
+        with self._lock:
             self.last_message_time = time.time()
-            return self.last_message_time
-    
-    def update_ping_time(self):
-        with self.lock:
-            self.last_ping_time = time.time()
-            return self.last_ping_time
-    
-    def set_thread(self, thread):
-        with self.lock:
-            self.thread = thread
-            return self.thread
-    
-    def set_instance(self, instance):
-        with self.lock:
-            self.ws_instance = instance
-            return self.ws_instance
-    
-    def new_session(self):
-        with self.lock:
-            self.session_id = str(uuid.uuid4())[:8]
-            self.reconnect_attempt += 1
-            self.should_run = True
-            self.subscriptions = {}
-            return self.session_id
-    
-    def stop(self):
-        with self.lock:
-            self.should_run = False
-            self.connected = False
     
     def get_status(self):
-        with self.lock:
-            thread_alive = self.thread is not None and self.thread.is_alive()
-            time_since_message = time.time() - self.last_message_time if self.last_message_time > 0 else float('inf')
-            time_since_ping = time.time() - self.last_ping_time if self.last_ping_time > 0 else float('inf')
-            
+        with self._lock:
             return {
-                'connected': self.connected,
-                'thread_alive': thread_alive,
-                'last_message_time': self.last_message_time,
-                'time_since_message': time_since_message,
-                'time_since_ping': time_since_ping,
-                'session_id': self.session_id,
-                'reconnect_attempt': self.reconnect_attempt,
-                'should_run': self.should_run,
-                'subscriptions': len(self.subscriptions),
-                'connection_type': self.connection_type
+                'connected': self.ws_connected,
+                'last_message': self.last_message_time,
+                'time_since_message': time.time() - self.last_message_time if self.last_message_time > 0 else float('inf'),
+                'thread_alive': self.connection_thread is not None and self.connection_thread.is_alive(),
+                'should_run': self.should_run
             }
 
-def initialize_dashboard_state():
-    """Initialize all dashboard state variables with proper defaults"""
-    if 'ws_state' not in st.session_state:
-        st.session_state.ws_state = WebSocketState()
+def initialize_session_state():
+    """Initialize all session state variables"""
+    if 'dashboard_state' not in st.session_state:
+        st.session_state.dashboard_state = DashboardState()
     
     if 'order_books' not in st.session_state:
         st.session_state.order_books = {}
@@ -184,60 +98,20 @@ def initialize_dashboard_state():
         st.session_state.trades = []
     if 'latest_prices' not in st.session_state:
         st.session_state.latest_prices = {}
-    if 'last_update' not in st.session_state:
-        st.session_state.last_update = datetime.now()
-    if 'ws_status' not in st.session_state:
-        st.session_state.ws_status = "Disconnected"
     if 'debug_msgs' not in st.session_state:
         st.session_state.debug_msgs = []
-    if 'processed_stats' not in st.session_state:
-        st.session_state.processed_stats = []
-    if 'use_alternative_ws' not in st.session_state:
-        st.session_state.use_alternative_ws = False
-
-# Initialize dashboard state
-initialize_dashboard_state()
-
-# Create global HTTP client
-@st.cache_resource
-def get_http_client():
-    """Get cached HTTP client"""
-    return SimpleHyperliquidClient()
-
-# Sidebar configuration
-st.sidebar.title("Arbitrage Dashboard Controls")
-instruments = st.sidebar.multiselect(
-    "Select Instruments",
-    ["BTC", "ETH", "SOL", "AVAX", "LINK", "DOGE"],
-    default=["BTC", "ETH", "SOL"]
-)
-
-update_interval = st.sidebar.slider(
-    "Update Interval (seconds)",
-    min_value=5,
-    max_value=60,
-    value=15,
-    step=5
-)
-
-# Trade threshold setting
-trade_threshold = st.sidebar.slider(
-    "Trade Threshold ($)",
-    min_value=100,
-    max_value=100000,
-    value=1000,  # Lowered from 50000 to 1000
-    step=500,
-    help="Show trades larger than this amount"
-)
+    if 'last_update' not in st.session_state:
+        st.session_state.last_update = datetime.now()
 
 def add_debug_msg(msg):
-    """Add debug message to queue with thread safety"""
+    """Add debug message with timestamp"""
     timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
     full_msg = f"{timestamp}: {msg}"
     
     try:
         debug_message_queue.put(full_msg, block=False)
     except queue.Full:
+        # Remove old messages if queue is full
         try:
             for _ in range(10):
                 debug_message_queue.get_nowait()
@@ -245,473 +119,164 @@ def add_debug_msg(msg):
         except:
             pass
     
-    print(full_msg)
+    logger.info(full_msg)
 
-def test_simple_websocket():
-    """Simple WebSocket test with enhanced debugging"""
-    add_debug_msg("Starting enhanced simple WebSocket test...")
-    
-    def simple_ws_test():
-        try:
-            import websocket
-            
-            # Enable WebSocket debugging
-            websocket.enableTrace(True)
-            
-            message_count = 0
-            
-            def on_message(ws, message):
-                nonlocal message_count
-                message_count += 1
-                add_debug_msg(f"Simple test message {message_count}: {message[:150]}")
-                
-                try:
-                    if message != "Websocket connection established.":
-                        data = json.loads(message)
-                        ws_message_queue.put(data, block=False)
-                        add_debug_msg(f"Simple test: Queued message {message_count}")
-                        
-                        # Mark connection as active when we receive data
-                        if 'ws_state' in st.session_state:
-                            st.session_state.ws_state.mark_connected("simple-test")
-                except Exception as e:
-                    add_debug_msg(f"Simple test: Error processing message: {str(e)}")
-            
-            def on_open(ws):
-                add_debug_msg("🎉 Simple test WebSocket opened successfully!")
-                
-                try:
-                    # Send allMids subscription
-                    allmids_sub = {
-                        "method": "subscribe",
-                        "subscription": {"type": "allMids"}
-                    }
-                    ws.send(json.dumps(allmids_sub))
-                    add_debug_msg("✅ Simple test: Sent allMids subscription")
-                    
-                    # Send trades subscriptions for all instruments
-                    for instrument in ['BTC', 'ETH', 'SOL']:
-                        trades_sub = {
-                            "method": "subscribe", 
-                            "subscription": {"type": "trades", "coin": instrument}
-                        }
-                        ws.send(json.dumps(trades_sub))
-                        add_debug_msg(f"✅ Simple test: Sent {instrument} trades subscription")
-                        
-                        # Send L2 book subscription
-                        book_sub = {
-                            "method": "subscribe",
-                            "subscription": {"type": "l2Book", "coin": instrument}
-                        }
-                        ws.send(json.dumps(book_sub))
-                        add_debug_msg(f"✅ Simple test: Sent {instrument} L2Book subscription")
-                    
-                    add_debug_msg("🚀 Simple test: All subscriptions sent!")
-                    
-                except Exception as e:
-                    add_debug_msg(f"❌ Simple test: Error sending subscriptions: {str(e)}")
-            
-            def on_error(ws, error):
-                add_debug_msg(f"❌ Simple test error: {str(error)}")
-                add_debug_msg(f"Error type: {type(error).__name__}")
-            
-            def on_close(ws, close_status_code, close_msg):
-                add_debug_msg(f"🔴 Simple test closed: {close_msg} (code: {close_status_code})")
-            
-            add_debug_msg("Creating simple WebSocket connection...")
-            
-            # Create simple WebSocket
-            ws = websocket.WebSocketApp(
-                "wss://api.hyperliquid.xyz/ws",
-                on_message=on_message,
-                on_open=on_open,
-                on_error=on_error,
-                on_close=on_close
-            )
-            
-            add_debug_msg("Starting simple WebSocket run_forever...")
-            
-            # Run WebSocket with timeout
-            ws.run_forever(
-                ping_interval=60,
-                ping_timeout=10,
-                skip_utf8_validation=True
-            )
-            
-        except Exception as e:
-            add_debug_msg(f"❌ Simple test exception: {str(e)}")
-            add_debug_msg(f"Exception traceback: {traceback.format_exc()}")
-    
-    # Run in thread
-    add_debug_msg("Starting simple test thread...")
-    thread = threading.Thread(target=simple_ws_test, daemon=True)
-    thread.start()
-    
-    return "Started enhanced simple WebSocket test"
+def create_info_client():
+    """Create Hyperliquid Info client"""
+    return Info(skip_ws=False)  # Enable WebSocket for real-time data
 
-# Original WebSocket implementation with enhanced debugging
-class HyperliquidWebSocketManager:
-    """WebSocket manager for Hyperliquid API with enhanced debugging"""
-    
-    def __init__(self, instruments, ws_state):
-        self.instruments = instruments
-        self.ws_state = ws_state
-        self.ws = None
-        self.ping_thread = None
-        self.stop_event = threading.Event()
-        self.subscription_id_counter = 0
-        self.ws_url = "wss://api.hyperliquid.xyz/ws"
+def websocket_message_handler(ws_msg):
+    """Handle incoming WebSocket messages"""
+    try:
+        # Update connection status
+        st.session_state.dashboard_state.update_message_time()
         
-    def start(self):
-        """Start the WebSocket connection with enhanced debugging"""
-        # Enable WebSocket debugging
-        websocket.enableTrace(True)
+        # Queue message for processing
+        ws_message_queue.put(ws_msg, block=False)
         
-        self.stop_event.clear()
-        self.ws_state.new_session()
-        
-        add_debug_msg(f"Starting Hyperliquid WebSocket connection to {self.ws_url}")
-        add_debug_msg(f"Selected instruments: {self.instruments}")
-        
-        # Create WebSocket with proper handlers
-        self.ws = websocket.WebSocketApp(
-            self.ws_url,
-            on_open=self.on_open,
-            on_message=self.on_message,
-            on_error=self.on_error,
-            on_close=self.on_close
-        )
-        
-        # Update WebSocket instance in state
-        self.ws_state.set_instance(self.ws)
-        
-        # Start ping thread
-        self.ping_thread = threading.Thread(target=self.send_ping_loop, daemon=True)
-        self.ping_thread.start()
-        
-        # Run WebSocket with better error handling
+    except queue.Full:
+        # Clear old messages if queue is full
         try:
-            add_debug_msg("Starting WebSocket run_forever...")
-            self.ws.run_forever(
-                ping_interval=0,
-                ping_timeout=10,
-                reconnect=0,
-                skip_utf8_validation=True,
-                http_proxy_host=None,
-                http_proxy_port=None
-            )
-            add_debug_msg("WebSocket run_forever completed normally")
-        except Exception as e:
-            add_debug_msg(f"WebSocket run_forever error: {str(e)}")
-            add_debug_msg(f"Error type: {type(e).__name__}")
-            add_debug_msg(f"Error details: {repr(e)}")
-            add_debug_msg(traceback.format_exc())
-        finally:
-            add_debug_msg("WebSocket cleanup started")
-            self.cleanup()
+            for _ in range(50):
+                ws_message_queue.get_nowait()
+            ws_message_queue.put(ws_msg, block=False)
+        except:
+            pass
+    except Exception as e:
+        add_debug_msg(f"Error in message handler: {str(e)}")
+
+def start_websocket_connection(instruments):
+    """Start WebSocket connection using Hyperliquid's built-in WebSocket"""
+    add_debug_msg("Starting Hyperliquid WebSocket connection")
     
-    def stop(self):
-        """Stop the WebSocket connection"""
-        add_debug_msg("Stopping WebSocket connection")
-        self.ws_state.stop()
-        self.stop_event.set()
+    try:
+        # Create Info client with WebSocket enabled
+        info_client = Info(skip_ws=False)
+        st.session_state.dashboard_state.info_client = info_client
         
-        if self.ws:
-            self.ws.close()
+        add_debug_msg("Info client created successfully")
         
-        self.cleanup()
-    
-    def cleanup(self):
-        """Clean up resources"""
-        self.ws_state.mark_disconnected()
-        if self.ping_thread and self.ping_thread.is_alive():
-            self.ping_thread.join(timeout=1)
-    
-    def on_open(self, ws):
-        """Handle WebSocket connection open"""
-        add_debug_msg("WebSocket connection opened successfully")
-        self.ws_state.mark_connected("websocket-client")
-        
-        # Wait a moment for connection to stabilize
-        time.sleep(0.5)
-        
-        # Subscribe to channels
+        # Subscribe to all mids
         try:
-            self.subscribe_to_channels()
-        except Exception as e:
-            add_debug_msg(f"Error during initial subscription: {str(e)}")
-    
-    def on_message(self, ws, message):
-        """Handle incoming WebSocket messages with enhanced debugging"""
-        try:
-            # Debug: Log raw message (first 10 messages only)
-            if not hasattr(self, 'message_count'):
-                self.message_count = 0
-            
-            self.message_count += 1
-            if self.message_count <= 10:
-                add_debug_msg(f"Raw WebSocket message {self.message_count}: {message[:200]}")
-            
-            # Handle connection confirmation message
-            if message == "Websocket connection established.":
-                add_debug_msg("Received connection establishment confirmation")
-                return
-            
-            # Update last message time
-            self.ws_state.update_last_message_time()
-            
-            # Parse JSON message
-            try:
-                data = json.loads(message)
-            except json.JSONDecodeError:
-                add_debug_msg(f"Non-JSON message: {message[:100]}")
-                return
-            
-            # Handle pong responses
-            if data.get('channel') == 'pong':
-                add_debug_msg("Received pong response")
-                return
-            
-            # Debug: Log message type
-            if self.message_count <= 20:
-                add_debug_msg(f"Parsed message {self.message_count}: {data.get('channel', 'unknown')} channel")
-            
-            # Queue message for processing
-            try:
-                ws_message_queue.put(data, block=False)
-            except queue.Full:
-                # If queue is full, remove old messages
-                try:
-                    for _ in range(100):
-                        ws_message_queue.get_nowait()
-                    ws_message_queue.put(data, block=False)
-                    add_debug_msg("Queue was full, cleared old messages")
-                except:
-                    add_debug_msg("Failed to clear queue, dropping message")
-            
-        except Exception as e:
-            add_debug_msg(f"Error in on_message: {str(e)}")
-            add_debug_msg(traceback.format_exc())
-    
-    def on_error(self, ws, error):
-        """Handle WebSocket errors with enhanced debugging"""
-        add_debug_msg(f"WebSocket error: {str(error)}")
-        add_debug_msg(f"Error type: {type(error).__name__}")
-        add_debug_msg(f"Error details: {repr(error)}")
-        self.ws_state.mark_disconnected()
-    
-    def on_close(self, ws, close_status_code, close_msg):
-        """Handle WebSocket connection close"""
-        add_debug_msg(f"WebSocket closed: {close_msg} (code: {close_status_code})")
-        self.ws_state.mark_disconnected()
-    
-    def send_ping_loop(self):
-        """Send periodic pings to keep connection alive"""
-        add_debug_msg("Ping loop started")
-        
-        while not self.stop_event.wait(50):  # 50 second interval
-            if not self.ws or not self.ws_state.should_run:
-                add_debug_msg("Ping loop stopping - no WebSocket or should_run is False")
-                break
-            
-            try:
-                ping_msg = json.dumps({"method": "ping"})
-                self.ws.send(ping_msg)
-                self.ws_state.update_ping_time()
-                add_debug_msg("Ping sent to server")
-            except Exception as e:
-                add_debug_msg(f"Error sending ping: {str(e)}")
-                break
-        
-        add_debug_msg("Ping loop stopped")
-    
-    def subscribe_to_channels(self):
-        """Subscribe to all required channels with enhanced debugging"""
-        subscription_count = 0
-        
-        add_debug_msg(f"Starting subscriptions for instruments: {self.instruments}")
-        
-        # Subscribe to allMids first
-        try:
-            allmids_sub = {
-                "method": "subscribe",
-                "subscription": {"type": "allMids"}
-            }
-            self.ws.send(json.dumps(allmids_sub))
-            subscription_count += 1
+            allmids_subscription: Subscription = {"type": "allMids"}
+            info_client.subscribe(allmids_subscription, websocket_message_handler)
             add_debug_msg("Subscribed to allMids")
-            time.sleep(0.1)
         except Exception as e:
             add_debug_msg(f"Error subscribing to allMids: {str(e)}")
         
-        # Subscribe to instrument-specific channels
-        for instrument in self.instruments:
+        # Subscribe to instrument-specific data
+        for instrument in instruments:
             try:
-                # L2 Book subscription
-                book_sub = {
-                    "method": "subscribe",
-                    "subscription": {"type": "l2Book", "coin": instrument}
-                }
-                self.ws.send(json.dumps(book_sub))
-                subscription_count += 1
-                add_debug_msg(f"Subscribed to l2Book for {instrument}")
-                time.sleep(0.1)
+                # Subscribe to L2 order book
+                l2_subscription: Subscription = {"type": "l2Book", "coin": instrument}
+                info_client.subscribe(l2_subscription, websocket_message_handler)
+                add_debug_msg(f"Subscribed to L2 book for {instrument}")
                 
-                # Trades subscription
-                trades_sub = {
-                    "method": "subscribe",
-                    "subscription": {"type": "trades", "coin": instrument}
-                }
-                self.ws.send(json.dumps(trades_sub))
-                subscription_count += 1
+                # Subscribe to trades
+                trades_subscription: Subscription = {"type": "trades", "coin": instrument}
+                info_client.subscribe(trades_subscription, websocket_message_handler)
                 add_debug_msg(f"Subscribed to trades for {instrument}")
-                time.sleep(0.1)
                 
             except Exception as e:
                 add_debug_msg(f"Error subscribing to {instrument}: {str(e)}")
         
-        add_debug_msg(f"Completed {subscription_count} subscription requests")
+        # Mark as connected
+        st.session_state.dashboard_state.mark_connected()
+        add_debug_msg("WebSocket subscriptions completed")
         
-        # Store subscription info
-        with self.ws_state.lock:
-            self.ws_state.subscriptions = {
-                'allmids': True,
-                'instruments': self.instruments.copy()
-            }
+        return True
+        
+    except Exception as e:
+        add_debug_msg(f"Error starting WebSocket connection: {str(e)}")
+        st.session_state.dashboard_state.mark_disconnected()
+        return False
 
-def run_websocket_thread(instruments, ws_state):
-    """Run WebSocket in a separate thread with improved error handling"""
+def websocket_thread_function(instruments):
+    """WebSocket thread function"""
     thread_id = threading.get_ident()
     add_debug_msg(f"WebSocket thread {thread_id} started")
     
-    reconnect_delay = 5
-    max_reconnect_delay = 60
-    
-    while ws_state.should_run:
-        try:
-            add_debug_msg("Creating new WebSocket manager instance")
-            ws_manager = HyperliquidWebSocketManager(instruments, ws_state)
+    try:
+        success = start_websocket_connection(instruments)
+        if success:
+            add_debug_msg("WebSocket connection established successfully")
             
-            add_debug_msg("Starting WebSocket connection...")
-            ws_manager.start()
+            # Keep thread alive
+            while st.session_state.dashboard_state.should_run:
+                time.sleep(1)
+        else:
+            add_debug_msg("Failed to establish WebSocket connection")
             
-            # If we reach here, the connection ended
-            add_debug_msg("WebSocket connection ended, checking if should reconnect")
-            
-            if not ws_state.should_run:
-                add_debug_msg("WebSocket thread told to stop, exiting")
-                break
-                
-            # Wait before reconnecting
-            add_debug_msg(f"Will reconnect in {reconnect_delay} seconds")
-            time.sleep(reconnect_delay)
-            
-            # Exponential backoff
-            reconnect_delay = min(reconnect_delay * 1.5, max_reconnect_delay)
-            
-        except Exception as e:
-            add_debug_msg(f"WebSocket thread error: {str(e)}")
-            add_debug_msg(traceback.format_exc())
-            
-            if not ws_state.should_run:
-                break
-                
-            # Wait before retrying
-            add_debug_msg(f"Error occurred, will retry in {reconnect_delay} seconds")
-            time.sleep(reconnect_delay)
-            reconnect_delay = min(reconnect_delay * 2, max_reconnect_delay)
-    
-    add_debug_msg(f"WebSocket thread {thread_id} ended")
+    except Exception as e:
+        add_debug_msg(f"WebSocket thread error: {str(e)}")
+    finally:
+        add_debug_msg(f"WebSocket thread {thread_id} ended")
 
-def start_websocket(use_alternative=False):
-    """Start WebSocket connection - simplified version"""
-    if 'ws_state' not in st.session_state:
-        st.session_state.ws_state = WebSocketState()
+def start_websocket_thread(instruments):
+    """Start WebSocket in a background thread"""
+    if st.session_state.dashboard_state.connection_thread and st.session_state.dashboard_state.connection_thread.is_alive():
+        add_debug_msg("WebSocket thread already running")
+        return "WebSocket already running"
     
-    # Stop existing connection if any
-    if st.session_state.ws_state.thread and st.session_state.ws_state.thread.is_alive():
-        add_debug_msg("Stopping existing WebSocket connection")
-        st.session_state.ws_state.stop()
-        if st.session_state.ws_state.ws_instance:
-            st.session_state.ws_state.ws_instance.close()
-        time.sleep(1)
+    # Create and start thread
+    thread = threading.Thread(target=websocket_thread_function, args=(instruments,), daemon=True)
+    thread.start()
+    st.session_state.dashboard_state.connection_thread = thread
     
-    # Start new connection
-    session_id = st.session_state.ws_state.new_session()
-    
-    if use_alternative:
-        add_debug_msg(f"Starting test WebSocket session: {session_id}")
-        # Use simple test for now
-        return test_simple_websocket()
-    else:
-        add_debug_msg(f"Starting standard WebSocket session: {session_id}")
-        ws_thread = threading.Thread(
-            target=run_websocket_thread,
-            args=(instruments, st.session_state.ws_state),
-            daemon=True
-        )
-        ws_thread.start()
-        st.session_state.ws_state.set_thread(ws_thread)
-    
-    return f"Started WebSocket connection (session: {session_id})"
+    add_debug_msg("WebSocket thread started")
+    return "WebSocket thread started"
 
 def process_websocket_messages():
-    """Process WebSocket messages with improved error handling and debugging"""
+    """Process queued WebSocket messages"""
     processed_count = 0
     trade_count = 0
     orderbook_count = 0
-    other_count = 0
-    large_trade_count = 0
+    price_count = 0
     
-    # Limit processing to prevent UI lag
-    max_process = min(100, ws_message_queue.qsize())
-    start_time = time.time()
+    # Process up to 50 messages per cycle to avoid blocking UI
+    max_process = min(50, ws_message_queue.qsize())
     
-    # Initialize summary
-    summary = f"No messages processed (queue size: {ws_message_queue.qsize()})"
-    
-    while processed_count < max_process and time.time() - start_time < 0.5:
+    while processed_count < max_process:
         try:
-            message = ws_message_queue.get_nowait()
+            ws_msg = ws_message_queue.get_nowait()
             processed_count += 1
             
-            # Skip subscription confirmations
-            if 'id' in message and 'result' in message:
-                other_count += 1
-                continue
-            
-            channel = message.get('channel', 'unknown')
+            channel = ws_msg.get('channel', 'unknown')
             
             # Debug first few messages
-            if processed_count <= 5:
-                add_debug_msg(f"Processing message {processed_count}: {channel} channel")
+            if processed_count <= 3:
+                add_debug_msg(f"Processing {channel} message")
             
-            # Process order book updates
-            if channel == 'l2Book' and 'data' in message:
-                orderbook_count += 1
-                data = message['data']
-                instrument = data.get('coin')
-                
-                if instrument in instruments:
-                    st.session_state.order_books[instrument] = data
+            # Process different message types
+            if channel == 'allMids':
+                # Update latest prices
+                data = ws_msg.get('data', {})
+                mids = data.get('mids', {})
+                for coin, price_str in mids.items():
+                    try:
+                        st.session_state.latest_prices[coin] = float(price_str)
+                        price_count += 1
+                    except (ValueError, TypeError):
+                        pass
             
-            # Process trade updates
-            elif channel == 'trades' and 'data' in message:
-                trades = message['data']
-                if not trades:
-                    continue
-                
-                # Debug trade messages
-                if trade_count < 3:
-                    add_debug_msg(f"Received {len(trades)} trades: {[t.get('coin') for t in trades]}")
-                
+            elif channel == 'l2Book':
+                # Update order book
+                data = ws_msg.get('data', {})
+                coin = data.get('coin')
+                if coin:
+                    st.session_state.order_books[coin] = data
+                    orderbook_count += 1
+            
+            elif channel == 'trades':
+                # Process trades
+                trades = ws_msg.get('data', [])
                 for trade in trades:
-                    instrument = trade.get('coin')
-                    
-                    if instrument in instruments:
-                        trade_count += 1
+                    try:
+                        coin = trade.get('coin')
+                        if not coin:
+                            continue
                         
-                        # Convert side codes
+                        # Convert side code to readable format
                         side_code = trade.get('side')
                         side = "Sell" if side_code == "A" else "Buy" if side_code == "B" else side_code
                         
@@ -719,74 +284,47 @@ def process_websocket_messages():
                         if 'sz' not in trade or 'px' not in trade:
                             continue
                         
-                        try:
-                            size = float(trade['sz'])
-                            price = float(trade['px'])
-                            notional = size * price
+                        size = float(trade['sz'])
+                        price = float(trade['px'])
+                        notional = size * price
+                        
+                        # Only record large trades (>$1000)
+                        if notional > 1000:
+                            trade_time = datetime.fromtimestamp(
+                                int(trade.get('time', time.time() * 1000)) / 1000
+                            )
                             
-                            # Record trades above threshold (now configurable)
-                            if notional > trade_threshold:
-                                large_trade_count += 1
-                                trade_time = datetime.fromtimestamp(
-                                    int(trade.get('time', time.time() * 1000)) / 1000
-                                )
-                                
-                                # Debug large trades
-                                if large_trade_count <= 3:
-                                    add_debug_msg(f"Large trade: {instrument} {side} ${notional:.2f}")
-                                
-                                # Add to trades list (thread-safe)
-                                if len(st.session_state.trades) >= 100:
-                                    st.session_state.trades = st.session_state.trades[-50:]
-                                
-                                st.session_state.trades.append({
-                                    'instrument': instrument,
-                                    'side': side,
-                                    'size': size,
-                                    'price': price,
-                                    'notional': notional,
-                                    'time': trade_time
-                                })
-                                
-                        except (ValueError, TypeError) as e:
-                            add_debug_msg(f"Error parsing trade data: {str(e)}")
+                            # Limit trades list size
+                            if len(st.session_state.trades) >= 100:
+                                st.session_state.trades = st.session_state.trades[-50:]
+                            
+                            st.session_state.trades.append({
+                                'instrument': coin,
+                                'side': side,
+                                'size': size,
+                                'price': price,
+                                'notional': notional,
+                                'time': trade_time
+                            })
+                            
+                            trade_count += 1
+                            
+                    except (ValueError, TypeError, KeyError) as e:
+                        continue
             
-            # Process allMids updates
-            elif channel == 'allMids' and 'data' in message:
-                other_count += 1
-                mids_data = message.get('data', {}).get('mids', {})
-                
-                for coin, price in mids_data.items():
-                    if coin in instruments:
-                        try:
-                            st.session_state.latest_prices[coin] = float(price)
-                        except (ValueError, TypeError):
-                            pass
-            
-            else:
-                other_count += 1
-                
         except queue.Empty:
             break
         except Exception as e:
             add_debug_msg(f"Error processing message: {str(e)}")
     
-    # Update connection status
-    if processed_count > 0 and not st.session_state.ws_state.connected:
-        st.session_state.ws_state.mark_connected()
-        st.session_state.ws_status = "Connected"
-    
-    processing_time = time.time() - start_time
-    
     # Create summary
     if processed_count > 0:
-        summary = (f"Processed {processed_count} messages in {processing_time:.2f}s: "
-                   f"{trade_count} trades ({large_trade_count} large), "
-                   f"{orderbook_count} books, {other_count} other")
-        if processed_count > 20 or large_trade_count > 0:
+        summary = (f"Processed {processed_count} messages: "
+                   f"{price_count} prices, {orderbook_count} books, {trade_count} trades")
+        if processed_count > 5:
             add_debug_msg(summary)
     else:
-        summary = f"No messages processed (queue: {ws_message_queue.qsize()}, time: {processing_time:.2f}s)"
+        summary = f"No messages (queue: {ws_message_queue.qsize()})"
     
     return summary, processed_count
 
@@ -802,25 +340,32 @@ def process_debug_messages():
             break
     
     if new_messages:
-        # Add to session state with size limit
         st.session_state.debug_msgs.extend(new_messages)
-        if len(st.session_state.debug_msgs) > 200:
-            st.session_state.debug_msgs = st.session_state.debug_msgs[-100:]
+        if len(st.session_state.debug_msgs) > 100:
+            st.session_state.debug_msgs = st.session_state.debug_msgs[-50:]
     
     return len(new_messages)
 
-# Data fetching functions
-@st.cache_data(ttl=update_interval)
-def get_order_book(instrument):
-    client = get_http_client()
-    return client.l2_snapshot(instrument)
-
-@st.cache_data(ttl=update_interval*2)
-def get_funding_rate(instrument):
-    client = get_http_client()
+# REST API functions for fallback data
+@st.cache_data(ttl=30)
+def get_order_book_fallback(instrument):
+    """Get order book using REST API as fallback"""
     try:
+        info_client = Info(skip_ws=True)
+        return info_client.l2_snapshot(instrument)
+    except Exception as e:
+        st.error(f"Error fetching order book for {instrument}: {str(e)}")
+        return None
+
+@st.cache_data(ttl=60)
+def get_funding_rate_fallback(instrument):
+    """Get funding rate using REST API as fallback"""
+    try:
+        info_client = Info(skip_ws=True)
         now = int(time.time() * 1000)
-        funding_history = client.funding_history(instrument, now - 2 * 60 * 60 * 1000, now)
+        start_time = now - (2 * 60 * 60 * 1000)  # 2 hours ago
+        
+        funding_history = info_client.funding_history(instrument, start_time, now)
         
         if not funding_history:
             return None
@@ -841,633 +386,546 @@ def get_funding_rate(instrument):
         st.error(f"Error fetching funding rate for {instrument}: {str(e)}")
         return None
 
-def update_data():
+def update_fallback_data(instruments):
+    """Update data using REST API fallback"""
     for instrument in instruments:
-        order_book = get_order_book(instrument)
+        # Update order book
+        order_book = get_order_book_fallback(instrument)
         if order_book:
             st.session_state.order_books[instrument] = order_book
         
-        funding_rate = get_funding_rate(instrument)
+        # Update funding rate
+        funding_rate = get_funding_rate_fallback(instrument)
         if funding_rate:
             st.session_state.funding_rates[instrument] = funding_rate
     
     st.session_state.last_update = datetime.now()
 
-# Main UI Layout
-st.title("Crypto Market Data Dashboard")
-st.markdown("Real-time monitoring of order books and funding rates")
+# Initialize session state
+initialize_session_state()
+
+# Sidebar configuration
+st.sidebar.title("Crypto Arbitrage Dashboard")
+
+instruments = st.sidebar.multiselect(
+    "Select Instruments",
+    ["BTC", "ETH", "SOL", "AVAX", "LINK", "DOGE"],
+    default=["BTC", "ETH", "SOL"]
+)
+
+update_interval = st.sidebar.slider(
+    "Update Interval (seconds)",
+    min_value=5,
+    max_value=60,
+    value=15,
+    step=5
+)
+
+trade_threshold = st.sidebar.slider(
+    "Large Trade Threshold ($)",
+    min_value=100,
+    max_value=50000,
+    value=1000,
+    step=100
+)
 
 # WebSocket status in sidebar
-if 'ws_state' in st.session_state and st.session_state.ws_state.connected:
-    status = st.session_state.ws_state.get_status()
-    connection_type = status.get('connection_type', 'unknown')
-    st.sidebar.success(f"WebSocket Connected ({connection_type})")
-    st.sidebar.text(f"Messages: {status['time_since_message']:.1f}s ago")
+status = st.session_state.dashboard_state.get_status()
+
+if status['connected']:
+    st.sidebar.success("🟢 WebSocket Connected")
+    st.sidebar.text(f"Last message: {status['time_since_message']:.1f}s ago")
     st.sidebar.text(f"Queue: {ws_message_queue.qsize()}")
-elif ws_message_queue.qsize() > 0:
-    # If we have messages in queue but state shows disconnected, show as receiving data
-    st.sidebar.success(f"Receiving Data (Queue: {ws_message_queue.qsize()})")
 else:
-    st.sidebar.error("WebSocket Disconnected")
-    col1, col2 = st.sidebar.columns(2)
-    with col1:
-        if st.button("Connect", key="sidebar_connect"):
-            result = start_websocket(use_alternative=False)
-            st.sidebar.info(result)
-    with col2:
-        if st.button("Simple Test", key="sidebar_simple_test"):
-            result = test_simple_websocket()
-            st.sidebar.info(result)
+    st.sidebar.error("🔴 WebSocket Disconnected")
+    if st.sidebar.button("Connect WebSocket"):
+        result = start_websocket_thread(instruments)
+        st.sidebar.info(result)
+
+# Main title
+st.title("🚀 Crypto Market Dashboard")
+st.markdown("Real-time monitoring of order books, funding rates, and large trades")
 
 # Create tabs
-tab1, tab2, tab3, tab4 = st.tabs(["Order Books", "Funding Rates", "Recent Trades", "Debug"])
+tab1, tab2, tab3, tab4 = st.tabs(["📊 Order Books", "💰 Funding Rates", "📈 Live Trades", "🐛 Debug"])
 
 # Order Books Tab
 with tab1:
     st.header("Order Book Data")
     
-    if st.button("Refresh Order Books", key="refresh_books"):
-        update_data()
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        st.text(f"Last updated: {st.session_state.last_update.strftime('%H:%M:%S')}")
+    with col2:
+        if st.button("🔄 Refresh", key="refresh_books"):
+            update_fallback_data(instruments)
     
-    st.text(f"Last updated: {st.session_state.last_update.strftime('%Y-%m-%d %H:%M:%S')}")
-    
-    cols = st.columns(len(instruments))
-    
-    for i, instrument in enumerate(instruments):
-        with cols[i]:
-            if instrument in st.session_state.order_books:
-                order_book = st.session_state.order_books[instrument]
+    # Display order books
+    if len(instruments) > 0:
+        cols = st.columns(len(instruments))
+        
+        for i, instrument in enumerate(instruments):
+            with cols[i]:
+                # Use real-time data if available, otherwise fallback
+                order_book = st.session_state.order_books.get(instrument)
+                if not order_book:
+                    order_book = get_order_book_fallback(instrument)
                 
-                if 'levels' in order_book and len(order_book['levels']) >= 2:
-                    # Add expandable depth control
-                    expand_key = f"expand_depth_{instrument}"
-                    if expand_key not in st.session_state:
-                        st.session_state[expand_key] = False
+                if order_book and 'levels' in order_book and len(order_book['levels']) >= 2:
+                    bids = order_book['levels'][0][:10]
+                    asks = order_book['levels'][1][:10]
                     
-                    # Determine how many levels to show
-                    if st.session_state[expand_key]:
-                        depth = 20  # Show more levels when expanded
-                        depth_label = "Show Less"
-                    else:
-                        depth = 5   # Show only 5 levels by default
-                        depth_label = "Show More"
-                    
-                    bids = order_book['levels'][0][:depth]
-                    asks = order_book['levels'][1][:depth]
-                    
-                    # Calculate metrics
-                    top_bid = float(bids[0]['px'])
-                    top_ask = float(asks[0]['px'])
-                    mid_price = (top_bid + top_ask) / 2
-                    spread = top_ask - top_bid
-                    spread_bps = (spread / mid_price) * 10000
-                    
-                    # Create enhanced dataframes
-                    bid_df = pd.DataFrame(bids)
-                    bid_df['px'] = pd.to_numeric(bid_df['px'])
-                    bid_df['sz'] = pd.to_numeric(bid_df['sz'])
-                    bid_df['total'] = bid_df['px'] * bid_df['sz']
-                    bid_df = bid_df.sort_values('px', ascending=False)  # Highest bid first
-                    
-                    ask_df = pd.DataFrame(asks)
-                    ask_df['px'] = pd.to_numeric(ask_df['px'])
-                    ask_df['sz'] = pd.to_numeric(ask_df['sz'])
-                    ask_df['total'] = ask_df['px'] * ask_df['sz']
-                    ask_df = ask_df.sort_values('px', ascending=True)  # Lowest ask first
-                    
-                    # Compact header with all info in one line
-                    st.markdown(f"""
-                    <div style='background: #1f2937; padding: 8px 15px; border-radius: 6px; margin: 5px 0;
-                                display: flex; justify-content: space-between; align-items: center;'>
-                        <h4 style='color: #f3f4f6; margin: 0; font-size: 1.1em;'>{instrument}</h4>
-                        <div style='color: #9ca3af; font-size: 0.9em;'>
-                            <span style='color: #22c55e;'>Bid: ${top_bid:.4f}</span> | 
-                            <span style='color: #ef4444;'>Ask: ${top_ask:.4f}</span> | 
-                            <span style='color: #f59e0b;'>Spread: {spread_bps:.2f}bps</span> | 
-                            <span style='color: #8b5cf6;'>Mid: ${mid_price:.4f}</span>
+                    if bids and asks:
+                        # Calculate metrics
+                        top_bid = float(bids[0]['px'])
+                        top_ask = float(asks[0]['px'])
+                        mid_price = (top_bid + top_ask) / 2
+                        spread = top_ask - top_bid
+                        spread_bps = (spread / mid_price) * 10000
+                        
+                        # Header with metrics
+                        st.markdown(f"""
+                        <div style='background: linear-gradient(90deg, #1f2937, #374151); 
+                                    padding: 12px; border-radius: 8px; margin-bottom: 10px;'>
+                            <h3 style='color: #f3f4f6; margin: 0; text-align: center;'>{instrument}</h3>
+                            <div style='display: flex; justify-content: space-between; margin-top: 8px; font-size: 0.9em;'>
+                                <span style='color: #22c55e;'>Bid: ${top_bid:,.2f}</span>
+                                <span style='color: #ef4444;'>Ask: ${top_ask:,.2f}</span>
+                                <span style='color: #f59e0b;'>{spread_bps:.1f}bps</span>
+                            </div>
                         </div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                    
-                    # Vertical order book layout: Asks above, Mid price in between, Bids below
-                    
-                    # Asks section (top)
-                    ask_col, expand_col = st.columns([4, 1])
-                    with ask_col:
-                        st.markdown("**Asks (Sells)**")
-                    with expand_col:
-                        if st.button(depth_label, key=f"expand_btn_{instrument}"):
-                            st.session_state[expand_key] = not st.session_state[expand_key]
-                            st.rerun()
-                    
-                    ask_display = ask_df.copy()
-                    ask_display.columns = ['Price', 'Size', 'Orders', 'Total']
-                    ask_display = ask_display[['Price', 'Size', 'Total']].iloc[::-1]  # Reverse to show highest first
-                    
-                    # Calculate height based on depth
-                    table_height = min(200, len(ask_display) * 35 + 40)  # 35px per row + header
-                    
-                    # Display asks with red styling
-                    st.dataframe(
-                        ask_display.style.background_gradient(
-                            subset=['Size'], 
-                            cmap='Reds', 
-                            vmin=0, 
-                            vmax=ask_display['Size'].max()
-                        ).format({
-                            'Price': '${:.4f}',
-                            'Size': '{:.1f}',
-                            'Total': '${:.0f}'
-                        }),
-                        use_container_width=True,
-                        height=table_height
-                    )
-                    
-                    # Mid price section (center) - Smaller size
-                    st.markdown(f"""
-                    <div style='background: linear-gradient(90deg, #fbbf24, #f59e0b); 
-                                padding: 6px 12px; border-radius: 4px; margin: 8px 0;
-                                text-align: center;'>
-                        <div style='color: #1f2937; font-weight: bold; font-size: 1.0em;'>
-                            Mid: ${mid_price:.4f} | Spread: {spread_bps:.2f}bps
-                        </div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                    
-                    # Bids section (bottom)
-                    st.markdown("**Bids (Buys)**")
-                    bid_display = bid_df.copy()
-                    bid_display.columns = ['Price', 'Size', 'Orders', 'Total']
-                    bid_display = bid_display[['Price', 'Size', 'Total']]
-                    
-                    # Display bids with green styling
-                    st.dataframe(
-                        bid_display.style.background_gradient(
-                            subset=['Size'], 
-                            cmap='Greens', 
-                            vmin=0, 
-                            vmax=bid_display['Size'].max()
-                        ).format({
-                            'Price': '${:.4f}',
-                            'Size': '{:.1f}',
-                            'Total': '${:.0f}'
-                        }),
-                        use_container_width=True,
-                        height=table_height
-                    )
-                    
-                    # Market Depth visualization with sentiment analysis
-                    
-                    # Calculate sentiment based on order book depth
-                    total_bid_volume = bid_df['sz'].sum()
-                    total_ask_volume = ask_df['sz'].sum()
-                    total_bid_value = bid_df['total'].sum()
-                    total_ask_value = ask_df['total'].sum()
-                    
-                    # Calculate bid/ask ratio for sentiment
-                    if total_ask_volume > 0:
-                        volume_ratio = total_bid_volume / total_ask_volume
-                    else:
-                        volume_ratio = float('inf')
-                    
-                    if total_ask_value > 0:
-                        value_ratio = total_bid_value / total_ask_value
-                    else:
-                        value_ratio = float('inf')
-                    
-                    # Determine sentiment based on ratios
-                    avg_ratio = (volume_ratio + value_ratio) / 2
-                    
-                    if avg_ratio > 1.2:
-                        sentiment = "🟢 Bullish"
-                        sentiment_color = "#22c55e"
-                        sentiment_desc = f"Strong bid support ({avg_ratio:.1f}x)"
-                    elif avg_ratio > 1.05:
-                        sentiment = "🟡 Slightly Bullish"
-                        sentiment_color = "#eab308"
-                        sentiment_desc = f"Bid leaning ({avg_ratio:.1f}x)"
-                    elif avg_ratio < 0.8:
-                        sentiment = "🔴 Bearish"
-                        sentiment_color = "#ef4444"
-                        sentiment_desc = f"Heavy ask pressure ({avg_ratio:.1f}x)"
-                    elif avg_ratio < 0.95:
-                        sentiment = "🟠 Slightly Bearish"
-                        sentiment_color = "#f97316"
-                        sentiment_desc = f"Ask leaning ({avg_ratio:.1f}x)"
-                    else:
-                        sentiment = "⚪ Neutral"
-                        sentiment_color = "#6b7280"
-                        sentiment_desc = f"Balanced ({avg_ratio:.1f}x)"
-                    
-                    # Header with asset name and sentiment
-                    st.markdown(f"""
-                    <div style='display: flex; justify-content: space-between; align-items: center; margin: 10px 0 5px 0;'>
-                        <h4 style='color: #f3f4f6; margin: 0; font-size: 1.1em;'>{instrument} Market Depth</h4>
-                        <div style='text-align: right;'>
-                            <div style='color: {sentiment_color}; font-weight: bold; font-size: 0.95em;'>{sentiment}</div>
-                            <div style='color: #9ca3af; font-size: 0.8em;'>{sentiment_desc}</div>
-                        </div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                    
-                    fig = go.Figure()
-                    
-                    # Add asks (red bars)
-                    fig.add_trace(go.Bar(
-                        x=ask_df['px'],
-                        y=ask_df['sz'],
-                        name='Asks',
-                        marker_color='rgba(239, 68, 68, 0.8)',
-                        opacity=0.8,
-                        hovertemplate='<b>Ask</b><br>Price: $%{x:.4f}<br>Size: %{y:.2f}<br>Value: $%{customdata:,.0f}<extra></extra>',
-                        customdata=ask_df['total']
-                    ))
-                    
-                    # Add bids (green bars)
-                    fig.add_trace(go.Bar(
-                        x=bid_df['px'],
-                        y=bid_df['sz'],
-                        name='Bids',
-                        marker_color='rgba(34, 197, 94, 0.8)',
-                        opacity=0.8,
-                        hovertemplate='<b>Bid</b><br>Price: $%{x:.4f}<br>Size: %{y:.2f}<br>Value: $%{customdata:,.0f}<extra></extra>',
-                        customdata=bid_df['total']
-                    ))
-                    
-                    # Add mid price line
-                    fig.add_vline(
-                        x=mid_price,
-                        line=dict(color='#f59e0b', width=2, dash='dash'),
-                        annotation=dict(
-                            text=f"Mid: ${mid_price:.4f}",
-                            bgcolor='#f59e0b',
-                            bordercolor='#f59e0b',
-                            font=dict(color='#1f2937')
+                        """, unsafe_allow_html=True)
+                        
+                        # Order book tables
+                        col_ask, col_bid = st.columns(2)
+                        
+                        with col_ask:
+                            st.markdown("**🔴 Asks**")
+                            ask_df = pd.DataFrame(asks)
+                            ask_df['px'] = pd.to_numeric(ask_df['px'])
+                            ask_df['sz'] = pd.to_numeric(ask_df['sz'])
+                            ask_df = ask_df.sort_values('px', ascending=True)
+                            
+                            display_asks = ask_df[['px', 'sz']].head(5)
+                            display_asks.columns = ['Price', 'Size']
+                            st.dataframe(
+                                display_asks.style.background_gradient(
+                                    subset=['Size'], cmap='Reds', vmin=0
+                                ).format({'Price': '${:.2f}', 'Size': '{:.4f}'}),
+                                use_container_width=True,
+                                height=200
+                            )
+                        
+                        with col_bid:
+                            st.markdown("**🟢 Bids**")
+                            bid_df = pd.DataFrame(bids)
+                            bid_df['px'] = pd.to_numeric(bid_df['px'])
+                            bid_df['sz'] = pd.to_numeric(bid_df['sz'])
+                            bid_df = bid_df.sort_values('px', ascending=False)
+                            
+                            display_bids = bid_df[['px', 'sz']].head(5)
+                            display_bids.columns = ['Price', 'Size']
+                            st.dataframe(
+                                display_bids.style.background_gradient(
+                                    subset=['Size'], cmap='Greens', vmin=0
+                                ).format({'Price': '${:.2f}', 'Size': '{:.4f}'}),
+                                use_container_width=True,
+                                height=200
+                            )
+                        
+                        # Order book depth chart
+                        fig = go.Figure()
+                        
+                        # Add bids (green)
+                        fig.add_trace(go.Bar(
+                            x=bid_df['px'].head(10),
+                            y=bid_df['sz'].head(10),
+                            name='Bids',
+                            marker_color='rgba(34, 197, 94, 0.7)',
+                            showlegend=False
+                        ))
+                        
+                        # Add asks (red)
+                        fig.add_trace(go.Bar(
+                            x=ask_df['px'].head(10),
+                            y=ask_df['sz'].head(10),
+                            name='Asks',
+                            marker_color='rgba(239, 68, 68, 0.7)',
+                            showlegend=False
+                        ))
+                        
+                        # Add mid price line
+                        fig.add_vline(
+                            x=mid_price,
+                            line=dict(color='#f59e0b', width=2, dash='dash'),
+                            annotation_text=f"Mid: ${mid_price:,.2f}"
                         )
-                    )
-                    
-                    fig.update_layout(
-                        title=None,
-                        xaxis_title="Price ($)",
-                        yaxis_title="Size",
-                        barmode='group',
-                        height=250,
-                        template="plotly_dark",
-                        showlegend=False,
-                        margin=dict(l=0, r=0, t=10, b=0),
-                        hovermode='x unified'
-                    )
-                    
-                    st.plotly_chart(fig, use_container_width=True)
+                        
+                        fig.update_layout(
+                            title=f"{instrument} Order Book Depth",
+                            xaxis_title="Price",
+                            yaxis_title="Size",
+                            height=300,
+                            template="plotly_dark",
+                            margin=dict(l=0, r=0, t=30, b=0)
+                        )
+                        
+                        st.plotly_chart(fig, use_container_width=True)
+                        
                 else:
-                    st.warning(f"No valid order book data for {instrument}")
-            else:
-                st.info(f"Loading order book data for {instrument}...")
+                    st.warning(f"No order book data for {instrument}")
 
 # Funding Rates Tab
 with tab2:
-    st.header("Funding Rate Data")
+    st.header("Funding Rate Analysis")
     
-    if st.button("Refresh Funding Rates", key="refresh_funding"):
-        update_data()
+    if st.button("🔄 Refresh Funding", key="refresh_funding"):
+        update_fallback_data(instruments)
     
     funding_data = []
     for instrument in instruments:
-        if instrument in st.session_state.funding_rates:
-            funding = st.session_state.funding_rates[instrument]
+        funding_rate = st.session_state.funding_rates.get(instrument)
+        if not funding_rate:
+            funding_rate = get_funding_rate_fallback(instrument)
+        
+        if funding_rate:
             funding_data.append({
                 'Instrument': instrument,
-                'Rate': funding['rate'] * 100,
-                'Annualized': funding['rate'] * 3 * 365 * 100,
-                'Next Funding': datetime.fromtimestamp(funding['next_funding_time']),
-                'Time to Next': (datetime.fromtimestamp(funding['next_funding_time']) - datetime.now()).total_seconds() / 3600
+                'Rate (%)': funding_rate['rate'] * 100,
+                'Annualized (%)': funding_rate['rate'] * 3 * 365 * 100,
+                'Next Funding': datetime.fromtimestamp(funding_rate['next_funding_time']),
+                'Time to Next (h)': (datetime.fromtimestamp(funding_rate['next_funding_time']) - datetime.now()).total_seconds() / 3600
             })
     
     if funding_data:
-        funding_df = pd.DataFrame(funding_data)
-        
+        # Metrics row
         st.subheader("Current Funding Rates")
         metrics_cols = st.columns(len(funding_data))
         
         for i, data in enumerate(funding_data):
             with metrics_cols[i]:
+                color = "normal"
+                if abs(data['Annualized (%)']) > 50:
+                    color = "inverse"
+                elif abs(data['Annualized (%)']) > 20:
+                    color = "off"
+                
                 st.metric(
-                    data['Instrument'], 
-                    f"{data['Rate']:.6f}%",
-                    f"{data['Annualized']:.2f}% ann."
+                    data['Instrument'],
+                    f"{data['Rate (%)']:.4f}%",
+                    f"{data['Annualized (%)']:.1f}% ann."
                 )
-                st.text(f"Next: {data['Next Funding'].strftime('%H:%M:%S')}")
-                st.text(f"In: {data['Time to Next']:.1f} hours")
+                st.caption(f"Next: {data['Next Funding'].strftime('%H:%M')} ({data['Time to Next (h)']:.1f}h)")
         
-        # Visualization
-        st.subheader("Funding Rate Comparison")
+        # Funding rate comparison chart
+        st.subheader("Annualized Funding Rate Comparison")
+        
         fig = go.Figure()
         
+        colors = ['#22c55e' if rate > 0 else '#ef4444' for rate in [d['Annualized (%)'] for d in funding_data]]
+        
         fig.add_trace(go.Bar(
-            x=[data['Instrument'] for data in funding_data],
-            y=[data['Annualized'] for data in funding_data],
-            name='Annualized Funding Rate (%)',
-            marker_color='blue'
+            x=[d['Instrument'] for d in funding_data],
+            y=[d['Annualized (%)'] for d in funding_data],
+            marker_color=colors,
+            text=[f"{d['Annualized (%)']:.1f}%" for d in funding_data],
+            textposition='auto',
         ))
         
         fig.update_layout(
-            title="Annualized Funding Rates by Instrument",
-            xaxis_title="Instrument", yaxis_title="Annualized Rate (%)",
-            height=400, margin=dict(l=0, r=0, t=40, b=0)
+            title="Annualized Funding Rates",
+            xaxis_title="Instrument",
+            yaxis_title="Annualized Rate (%)",
+            template="plotly_dark",
+            height=400,
+            showlegend=False
         )
+        
+        # Add horizontal lines for reference
+        fig.add_hline(y=0, line_dash="dash", line_color="gray")
+        fig.add_hline(y=20, line_dash="dot", line_color="orange", annotation_text="20% threshold")
+        fig.add_hline(y=-20, line_dash="dot", line_color="orange")
         
         st.plotly_chart(fig, use_container_width=True)
         
-        st.subheader("Funding Rate Details")
-        st.dataframe(funding_df, use_container_width=True)
+        # Detailed table
+        st.subheader("Detailed Funding Information")
+        df = pd.DataFrame(funding_data)
+        st.dataframe(
+            df.style.format({
+                'Rate (%)': '{:.6f}',
+                'Annualized (%)': '{:.2f}',
+                'Time to Next (h)': '{:.1f}'
+            }),
+            use_container_width=True
+        )
     else:
         st.info("Loading funding rate data...")
 
-# Recent Trades Tab
+# Live Trades Tab
 with tab3:
-    st.header("Recent Large Trades")
+    st.header("Live Trade Feed")
     
+    # Connection status
     col1, col2, col3 = st.columns([2, 1, 1])
     
     with col1:
-        if 'ws_state' in st.session_state and st.session_state.ws_state.connected:
-            status = st.session_state.ws_state.get_status()
-            connection_type = status.get('connection_type', 'unknown')
-            st.success(f"WebSocket Connected ({connection_type}) - Receiving Live Trade Data")
-            st.info(f"Queue: {ws_message_queue.qsize()} | Trades: {len(st.session_state.trades)} | Threshold: ${trade_threshold:,}")
+        if status['connected']:
+            st.success(f"🟢 Live data connected | Queue: {ws_message_queue.qsize()}")
+            st.info(f"Showing trades > ${trade_threshold:,} | Total recorded: {len(st.session_state.trades)}")
         else:
-            st.warning("WebSocket Disconnected - Click 'Connect' to start")
+            st.warning("🔴 Not connected to live feed")
     
     with col2:
-        if st.button("Connect WebSocket", key="trades_connect"):
-            result = start_websocket(use_alternative=False)
-            st.info(result)
+        if st.button("🔌 Connect", key="connect_trades"):
+            result = start_websocket_thread(instruments)
+            st.success(result)
     
     with col3:
-        if st.button("Try Alternative", key="trades_alt_connect"):
-            result = start_websocket(use_alternative=True)
-            st.info(result)
+        if st.button("🗑️ Clear Trades", key="clear_trades"):
+            st.session_state.trades = []
+            st.success("Trades cleared")
     
     if st.session_state.trades:
-        st.info(f"Received {len(st.session_state.trades)} large trades (>${trade_threshold:,})")
-        
-        # Convert to DataFrame
+        # Recent trades table
         trades_df = pd.DataFrame(st.session_state.trades)
         trades_df = trades_df.sort_values('time', ascending=False)
         
-        # Format for display
-        trades_display = trades_df.copy()
-        trades_display['time'] = trades_display['time'].dt.strftime('%H:%M:%S')
-        trades_display['notional'] = trades_display['notional'].apply(lambda x: f"${x:,.2f}")
-        trades_display['color'] = trades_display['side'].apply(lambda x: "🟢" if x == "Buy" else "🔴")
-        trades_display['trade'] = trades_display['color'] + " " + trades_display['side']
+        # Format display
+        display_df = trades_df.head(20).copy()
+        display_df['time'] = display_df['time'].dt.strftime('%H:%M:%S')
+        display_df['side_color'] = display_df['side'].apply(lambda x: "🟢" if x == "Buy" else "🔴")
+        display_df['trade'] = display_df['side_color'] + " " + display_df['side']
+        display_df['notional'] = display_df['notional'].apply(lambda x: f"${x:,.0f}")
+        display_df['price'] = display_df['price'].apply(lambda x: f"${x:,.2f}")
         
-        st.subheader(f"Recent Large Trades (>${trade_threshold:,})")
+        st.subheader("Recent Large Trades")
         st.dataframe(
-            trades_display[['time', 'instrument', 'trade', 'price', 'size', 'notional']],
-            use_container_width=True
+            display_df[['time', 'instrument', 'trade', 'price', 'size', 'notional']].rename(columns={
+                'time': 'Time',
+                'instrument': 'Asset',
+                'trade': 'Side',
+                'price': 'Price',
+                'size': 'Size',
+                'notional': 'Value'
+            }),
+            use_container_width=True,
+            height=400
         )
         
-        if len(trades_df) > 3:
-            # Trade volume visualization
-            st.subheader("Trade Volume by Instrument and Side")
-            
-            trade_summary = trades_df.groupby(['instrument', 'side'])['notional'].sum().reset_index()
-            
-            fig = go.Figure()
-            
-            for instrument in instruments:
-                instrument_data = trade_summary[trade_summary['instrument'] == instrument]
-                
-                buy_data = instrument_data[instrument_data['side'] == 'Buy']
-                buy_volume = buy_data['notional'].sum() if not buy_data.empty else 0
-                
-                sell_data = instrument_data[instrument_data['side'] == 'Sell']
-                sell_volume = sell_data['notional'].sum() if not sell_data.empty else 0
-                
-                fig.add_trace(go.Bar(
-                    x=[instrument], y=[buy_volume],
-                    name=f'{instrument} Buy', marker_color='green'
-                ))
-                
-                fig.add_trace(go.Bar(
-                    x=[instrument], y=[sell_volume],
-                    name=f'{instrument} Sell', marker_color='red'
-                ))
-            
-            fig.update_layout(
-                title="Large Trade Volume by Instrument and Side",
-                xaxis_title="Instrument", yaxis_title="Volume ($)",
-                barmode='group', height=400
-            )
-            
-            st.plotly_chart(fig, use_container_width=True)
-            
-            # Trade statistics
-            trade_counts = trades_df['instrument'].value_counts().reset_index()
-            trade_counts.columns = ['Instrument', 'Count']
-            
+        if len(trades_df) > 5:
+            # Trade analysis
             col1, col2 = st.columns(2)
             
             with col1:
-                st.subheader("Trade Count by Instrument")
-                fig = go.Figure(data=[go.Pie(
-                    labels=trade_counts['Instrument'],
-                    values=trade_counts['Count'],
-                    hole=.3
-                )])
+                # Volume by instrument
+                volume_by_instrument = trades_df.groupby('instrument')['notional'].sum().reset_index()
+                volume_by_instrument = volume_by_instrument.sort_values('notional', ascending=False)
+                
+                fig = go.Figure(data=[
+                    go.Pie(
+                        labels=volume_by_instrument['instrument'],
+                        values=volume_by_instrument['notional'],
+                        hole=.3,
+                        title="Trade Volume by Asset"
+                    )
+                ])
+                fig.update_layout(template="plotly_dark", height=300)
                 st.plotly_chart(fig, use_container_width=True)
             
             with col2:
-                st.subheader("Buy vs Sell Ratio")
-                buy_sell_counts = trades_df['side'].value_counts().reset_index()
-                buy_sell_counts.columns = ['Side', 'Count']
+                # Buy vs Sell volume
+                side_volume = trades_df.groupby('side')['notional'].sum().reset_index()
                 
-                fig = go.Figure(data=[go.Pie(
-                    labels=buy_sell_counts['Side'],
-                    values=buy_sell_counts['Count'],
-                    hole=.3,
-                    marker_colors=['green', 'red']
-                )])
+                fig = go.Figure(data=[
+                    go.Pie(
+                        labels=side_volume['side'],
+                        values=side_volume['notional'],
+                        hole=.3,
+                        marker_colors=['#22c55e', '#ef4444'],
+                        title="Buy vs Sell Volume"
+                    )
+                ])
+                fig.update_layout(template="plotly_dark", height=300)
                 st.plotly_chart(fig, use_container_width=True)
+            
+            # Trade timeline
+            st.subheader("Trade Timeline")
+            
+            # Group trades by 5-minute intervals
+            trades_df['time_bucket'] = trades_df['time'].dt.floor('5T')
+            timeline_data = trades_df.groupby(['time_bucket', 'side'])['notional'].sum().reset_index()
+            
+            fig = go.Figure()
+            
+            for side in ['Buy', 'Sell']:
+                side_data = timeline_data[timeline_data['side'] == side]
+                fig.add_trace(go.Bar(
+                    x=side_data['time_bucket'],
+                    y=side_data['notional'],
+                    name=side,
+                    marker_color='#22c55e' if side == 'Buy' else '#ef4444'
+                ))
+            
+            fig.update_layout(
+                title="Trade Volume Over Time (5-minute intervals)",
+                xaxis_title="Time",
+                yaxis_title="Volume ($)",
+                template="plotly_dark",
+                barmode='group',
+                height=400
+            )
+            
+            st.plotly_chart(fig, use_container_width=True)
+    
     else:
-        st.info(f"Waiting for trades data... Connect WebSocket to see real-time trades above ${trade_threshold:,}")
+        st.info(f"Waiting for trade data... Connect to WebSocket to see trades above ${trade_threshold:,}")
 
 # Debug Tab
 with tab4:
     st.header("Debug Information")
     
-    # Connection Status
+    # Connection status details
     st.subheader("Connection Status")
     
-    if 'ws_state' in st.session_state:
-        status = st.session_state.ws_state.get_status()
-        
-        status_cols = st.columns(5)
-        
-        with status_cols[0]:
-            if status['connected']:
-                st.success("Connected")
-            else:
-                st.error("Disconnected")
-        
-        with status_cols[1]:
-            if status['thread_alive']:
-                st.success("Thread Alive")
-            else:
-                st.error("Thread Dead")
-        
-        with status_cols[2]:
-            queue_size = ws_message_queue.qsize()
-            if queue_size > 0:
-                st.success(f"Queue: {queue_size}")
-            else:
-                st.warning("Queue: Empty")
-        
-        with status_cols[3]:
-            if status['time_since_message'] < 60:
-                st.success(f"Last Msg: {status['time_since_message']:.1f}s")
-            else:
-                st.error(f"Last Msg: {status['time_since_message']:.1f}s")
-        
-        with status_cols[4]:
-            connection_type = status.get('connection_type', 'unknown')
-            st.info(f"Type: {connection_type}")
-        
-        # Detailed status
-        st.subheader("Detailed Status")
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.write(f"**Session ID:** {status['session_id']}")
-            st.write(f"**Reconnect Attempts:** {status['reconnect_attempt']}")
-            st.write(f"**Should Run:** {status['should_run']}")
-            st.write(f"**Subscriptions:** {status['subscriptions']}")
-            st.write(f"**Connection Type:** {status.get('connection_type', 'unknown')}")
-            
-            if status['last_message_time'] > 0:
-                last_msg_time = datetime.fromtimestamp(status['last_message_time']).strftime('%H:%M:%S')
-                st.write(f"**Last Message Time:** {last_msg_time}")
-            
-            if status['time_since_ping'] < float('inf'):
-                st.write(f"**Last Ping:** {status['time_since_ping']:.1f}s ago")
-        
-        with col2:
-            # Control buttons
-            if st.button("Standard WebSocket", key="force_reconnect"):
-                result = start_websocket(use_alternative=False)
-                st.success(result)
-            
-            if st.button("Simple Test", key="alt_reconnect"):
-                result = start_websocket(use_alternative=True)
-                st.success(result)
-            
-            if st.button("Manual Test", key="manual_test"):
-                result = test_simple_websocket()
-                st.success(result)
-            
-            if st.button("Stop Connection", key="stop_connection"):
-                if 'ws_state' in st.session_state:
-                    st.session_state.ws_state.stop()
-                    if st.session_state.ws_state.ws_instance:
-                        st.session_state.ws_state.ws_instance.close()
-                st.success("Connection stopped")
-            
-            if st.button("Clear All Data", key="clear_data"):
-                st.session_state.trades = []
-                st.session_state.order_books = {}
-                st.session_state.latest_prices = {}
-                st.success("Data cleared")
+    status = st.session_state.dashboard_state.get_status()
     
-    # Debug Messages
-    st.subheader("Debug Messages")
-    
-    col1, col2 = st.columns([3, 1])
+    col1, col2, col3, col4 = st.columns(4)
     
     with col1:
-        if st.session_state.debug_msgs:
-            # Show latest messages first
-            recent_msgs = st.session_state.debug_msgs[-50:]
-            st.code('\n'.join(reversed(recent_msgs)))
+        if status['connected']:
+            st.success("🟢 Connected")
         else:
-            st.info("No debug messages yet")
+            st.error("🔴 Disconnected")
     
     with col2:
-        if st.button("Refresh Debug", key="refresh_debug"):
-            st.rerun()
-        
-        if st.button("Clear Debug", key="clear_debug"):
+        if status['thread_alive']:
+            st.success("🟢 Thread Active")
+        else:
+            st.error("🔴 Thread Inactive")
+    
+    with col3:
+        queue_size = ws_message_queue.qsize()
+        if queue_size > 0:
+            st.success(f"📥 Queue: {queue_size}")
+        else:
+            st.warning("📥 Queue: Empty")
+    
+    with col4:
+        if status['time_since_message'] < 30:
+            st.success(f"⏰ Last: {status['time_since_message']:.1f}s")
+        else:
+            st.error(f"⏰ Last: {status['time_since_message']:.1f}s")
+    
+    # Control buttons
+    st.subheader("Controls")
+    
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        if st.button("🔌 Connect WebSocket", key="debug_connect"):
+            result = start_websocket_thread(instruments)
+            st.success(result)
+    
+    with col2:
+        if st.button("🔄 Refresh Data", key="debug_refresh"):
+            update_fallback_data(instruments)
+            st.success("Data refreshed")
+    
+    with col3:
+        if st.button("🗑️ Clear Debug Log", key="clear_debug"):
             st.session_state.debug_msgs = []
-            st.success("Debug messages cleared")
+            st.success("Debug log cleared")
     
-    # Raw Data
-    st.subheader("Raw Trade Data")
-    if st.session_state.trades:
-        st.write(f"**Total trades:** {len(st.session_state.trades)}")
+    with col4:
+        if st.button("🗑️ Clear All Data", key="clear_all_data"):
+            st.session_state.trades = []
+            st.session_state.order_books = {}
+            st.session_state.latest_prices = {}
+            st.success("All data cleared")
+    
+    # Debug messages
+    st.subheader("Debug Messages")
+    
+    if st.session_state.debug_msgs:
+        # Show latest 30 messages
+        recent_msgs = st.session_state.debug_msgs[-30:]
+        debug_text = '\n'.join(reversed(recent_msgs))
+        st.text_area("Recent Debug Messages", debug_text, height=300)
+    else:
+        st.info("No debug messages yet")
+    
+    # System information
+    st.subheader("System Information")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.write("**WebSocket Queue Status:**")
+        st.write(f"- Queue Size: {ws_message_queue.qsize()}")
+        st.write(f"- Debug Queue: {debug_message_queue.qsize()}")
+        st.write(f"- Instruments: {len(instruments)}")
+        st.write(f"- Connected: {status['connected']}")
+        
+    with col2:
+        st.write("**Data Status:**")
+        st.write(f"- Order Books: {len(st.session_state.order_books)}")
+        st.write(f"- Latest Prices: {len(st.session_state.latest_prices)}")
+        st.write(f"- Total Trades: {len(st.session_state.trades)}")
+        st.write(f"- Last Update: {st.session_state.last_update.strftime('%H:%M:%S')}")
+    
+    # Raw data preview
+    if st.checkbox("Show Raw Data", key="show_raw_data"):
+        st.subheader("Raw Data Preview")
+        
+        if st.session_state.latest_prices:
+            st.write("**Latest Prices:**")
+            st.json(dict(list(st.session_state.latest_prices.items())[:5]))
+        
         if st.session_state.trades:
-            st.json(st.session_state.trades[-3:])
-    else:
-        st.info("No trade data available")
-    
-    # Latest Prices
-    st.subheader("Latest Prices")
-    if st.session_state.latest_prices:
-        prices_df = pd.DataFrame(list(st.session_state.latest_prices.items()), 
-                                columns=['Instrument', 'Price'])
-        st.dataframe(prices_df, use_container_width=True)
-    else:
-        st.info("No price data available")
+            st.write("**Recent Trades (Last 3):**")
+            recent_trades = st.session_state.trades[-3:]
+            trades_for_display = []
+            for trade in recent_trades:
+                trade_copy = trade.copy()
+                trade_copy['time'] = trade_copy['time'].isoformat()
+                trades_for_display.append(trade_copy)
+            st.json(trades_for_display)
 
-# Main processing loop
-# Process debug messages
-debug_count = process_debug_messages()
-
-# Process WebSocket messages
+# Process messages and update debug info
+process_debug_messages()
 result, processed_count = process_websocket_messages()
 
-# Update statistics
-if 'processed_stats' not in st.session_state:
-    st.session_state.processed_stats = []
-
-st.session_state.processed_stats.append({
-    'time': datetime.now(),
-    'count': processed_count
-})
-
-# Keep only recent stats
-if len(st.session_state.processed_stats) > 100:
-    st.session_state.processed_stats = st.session_state.processed_stats[-50:]
-
-# Display processing result in sidebar
-if processed_count > 0:
-    st.sidebar.text(f"Processed: {processed_count} msgs")
-
-# Auto-start WebSocket if not connected
-if 'ws_state' not in st.session_state:
-    st.session_state.ws_state = WebSocketState()
-
-if not st.session_state.ws_state.connected:
-    if not st.session_state.ws_state.thread or not st.session_state.ws_state.thread.is_alive():
-        # Auto-start with standard WebSocket
+# Auto-start WebSocket if not connected and no thread running
+if not status['connected'] and not status['thread_alive']:
+    if st.sidebar.button("🚀 Auto-Start WebSocket"):
         add_debug_msg("Auto-starting WebSocket connection")
-        start_websocket(use_alternative=False)
+        start_websocket_thread(instruments)
 
-# Initial data load
-if not st.session_state.order_books or not st.session_state.funding_rates:
-    update_data()
+# Sidebar status update
+if status['connected']:
+    st.sidebar.success(f"🟢 Connected | Processed: {processed_count}")
+    st.sidebar.text(f"Queue: {ws_message_queue.qsize()} | Trades: {len(st.session_state.trades)}")
+else:
+    st.sidebar.error("🔴 Disconnected")
 
-# Auto-refresh
-if st.sidebar.checkbox("Auto-refresh", value=True, key="auto_refresh"):
-    refresh_rate = st.sidebar.slider("Refresh rate (sec)", 1, 30, 5, key="refresh_rate")
-    st.sidebar.write(f"Dashboard refreshes every {refresh_rate} seconds")
+# Initial data load if needed
+if not st.session_state.order_books and not st.session_state.funding_rates:
+    with st.spinner("Loading initial data..."):
+        update_fallback_data(instruments)
+
+# Auto-refresh functionality
+if st.sidebar.checkbox("Auto-refresh", value=True):
+    refresh_rate = st.sidebar.slider("Refresh rate (sec)", 1, 30, 5)
+    st.sidebar.text(f"Auto-refreshing every {refresh_rate}s")
     
-    # Show connection status
-    if 'ws_state' in st.session_state and st.session_state.ws_state.connected:
-        status = st.session_state.ws_state.get_status()
-        connection_type = status.get('connection_type', 'unknown')
-        st.sidebar.success(f"WebSocket OK ({connection_type}) | Queue: {ws_message_queue.qsize()}")
+    # Show connection health
+    if status['connected'] and status['time_since_message'] < 60:
+        st.sidebar.success("📡 Live data streaming")
+    elif ws_message_queue.qsize() > 0:
+        st.sidebar.warning("📦 Processing queued data")
     else:
-        st.sidebar.error("WebSocket disconnected")
+        st.sidebar.error("⚠️ No live data")
     
     time.sleep(refresh_rate)
     st.rerun()

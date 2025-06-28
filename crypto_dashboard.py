@@ -1073,8 +1073,8 @@ def create_seamless_orderbook(instrument, order_book_data):
         paper_bgcolor='rgba(0,0,0,0)'
     )
     
-    fig.update_xaxis(showgrid=True, gridwidth=1, gridcolor='rgba(107, 114, 128, 0.3)')
-    fig.update_yaxis(showgrid=True, gridwidth=1, gridcolor='rgba(107, 114, 128, 0.3)')
+    fig.update_xaxis(showgrid=True, gridcolor='rgba(107, 114, 128, 0.3)')
+    fig.update_yaxis(showgrid=True, gridcolor='rgba(107, 114, 128, 0.3)')
     
     st.plotly_chart(fig, use_container_width=True)
 

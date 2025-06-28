@@ -957,7 +957,7 @@ def create_seamless_orderbook(instrument, order_book_data):
         <div style='background: #1f2937; padding: 8px 16px; border-bottom: 1px solid #374151;
                     display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; 
                     font-size: 0.8em; font-weight: 600; color: #9ca3af; text-transform: uppercase;'>
-            <div style='text-align: left;'>Price ({instrument.split('-')[0] if '-' in instrument else 'USD'})</div>
+            <div style='text-align: left;'>Price ({instrument.replace('-PERP', '') if '-' in instrument else 'USD'})</div>
             <div style='text-align: right;'>Size</div>
             <div style='text-align: right;'>Total</div>
         </div>
@@ -1026,31 +1026,29 @@ def create_seamless_orderbook(instrument, order_book_data):
     # Display the seamless order book
     st.markdown(orderbook_html, unsafe_allow_html=True)
     
-    # Add depth chart below
+    # Add depth chart below - using the original bar chart format
     fig = go.Figure()
     
-    # Add ask depth
-    ask_x = [ask['price'] for ask in ask_data]
-    ask_y = [ask['cumulative'] for ask in ask_data]
-    fig.add_trace(go.Scatter(
-        x=ask_x, y=ask_y,
-        fill='tonexty', fillcolor='rgba(239, 68, 68, 0.3)',
-        line=dict(color='#ef4444', width=2),
-        name='Ask Depth',
-        mode='lines',
-        hovertemplate='Price: $%{x:.4f}<br>Cumulative: %{y:.2f}<extra></extra>'
+    # Add asks (red bars)
+    ask_prices = [ask['price'] for ask in ask_data]
+    ask_sizes = [ask['size'] for ask in ask_data]
+    fig.add_trace(go.Bar(
+        x=ask_prices,
+        y=ask_sizes,
+        name='Asks',
+        marker_color='rgba(239, 68, 68, 0.8)',
+        opacity=0.8
     ))
     
-    # Add bid depth
-    bid_x = [bid['price'] for bid in bid_data]
-    bid_y = [bid['cumulative'] for bid in bid_data]
-    fig.add_trace(go.Scatter(
-        x=bid_x, y=bid_y,
-        fill='tonexty', fillcolor='rgba(34, 197, 94, 0.3)',
-        line=dict(color='#22c55e', width=2),
-        name='Bid Depth',
-        mode='lines',
-        hovertemplate='Price: $%{x:.4f}<br>Cumulative: %{y:.2f}<extra></extra>'
+    # Add bids (green bars)
+    bid_prices = [bid['price'] for bid in bid_data]
+    bid_sizes = [bid['size'] for bid in bid_data]
+    fig.add_trace(go.Bar(
+        x=bid_prices,
+        y=bid_sizes,
+        name='Bids',
+        marker_color='rgba(34, 197, 94, 0.8)',
+        opacity=0.8
     ))
     
     # Add mid price line
@@ -1062,23 +1060,16 @@ def create_seamless_orderbook(instrument, order_book_data):
     )
     
     fig.update_layout(
-        title=None,
+        title=f"{instrument} Order Book Depth",
         xaxis_title="Price",
-        yaxis_title="Cumulative Size",
+        yaxis_title="Size",
+        barmode='group',
         height=300,
         template="plotly_dark",
         showlegend=False,
-        margin=dict(l=0, r=0, t=20, b=0),
+        margin=dict(l=0, r=0, t=40, b=0),
         plot_bgcolor='rgba(0,0,0,0)',
-        paper_bgcolor='rgba(0,0,0,0)',
-        xaxis=dict(
-            showgrid=True,
-            gridcolor='rgba(107, 114, 128, 0.3)'
-        ),
-        yaxis=dict(
-            showgrid=True,
-            gridcolor='rgba(107, 114, 128, 0.3)'
-        )
+        paper_bgcolor='rgba(0,0,0,0)'
     )
     
     st.plotly_chart(fig, use_container_width=True)

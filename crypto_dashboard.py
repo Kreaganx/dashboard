@@ -1070,11 +1070,16 @@ def create_seamless_orderbook(instrument, order_book_data):
         showlegend=False,
         margin=dict(l=0, r=0, t=20, b=0),
         plot_bgcolor='rgba(0,0,0,0)',
-        paper_bgcolor='rgba(0,0,0,0)'
+        paper_bgcolor='rgba(0,0,0,0)',
+        xaxis=dict(
+            showgrid=True,
+            gridcolor='rgba(107, 114, 128, 0.3)'
+        ),
+        yaxis=dict(
+            showgrid=True,
+            gridcolor='rgba(107, 114, 128, 0.3)'
+        )
     )
-    
-    fig.update_xaxis(showgrid=True, gridcolor='rgba(107, 114, 128, 0.3)')
-    fig.update_yaxis(showgrid=True, gridcolor='rgba(107, 114, 128, 0.3)')
     
     st.plotly_chart(fig, use_container_width=True)
 

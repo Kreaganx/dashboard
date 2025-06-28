@@ -204,12 +204,40 @@ def get_http_client():
     """Get cached HTTP client"""
     return SimpleHyperliquidClient()
 
+# Get available instruments from API
+@st.cache_data(ttl=3600)  # Cache for 1 hour
+def get_available_instruments():
+    """Get list of available instruments from Hyperliquid"""
+    try:
+        client = get_http_client()
+        # Get meta data to find all available coins
+        meta_response = client.session.post(
+            f"{client.base_url}/info",
+            json={"type": "meta"},
+            timeout=10
+        )
+        if meta_response.status_code == 200:
+            meta_data = meta_response.json()
+            if 'universe' in meta_data:
+                instruments = [coin['name'] for coin in meta_data['universe']]
+                return sorted(instruments)  # Sort alphabetically
+    except Exception as e:
+        st.error(f"Error fetching available instruments: {str(e)}")
+    
+    # Fallback to common instruments if API fails
+    return ["BTC", "ETH", "SOL", "AVAX", "LINK", "DOGE", "MATIC", "UNI", "AAVE", "CRV"]
+
 # Sidebar configuration
 st.sidebar.title("Arbitrage Dashboard Controls")
+
+# Get available instruments
+available_instruments = get_available_instruments()
+
 instruments = st.sidebar.multiselect(
     "Select Instruments",
-    ["BTC", "ETH", "SOL", "AVAX", "LINK", "DOGE"],
-    default=["BTC", "ETH", "SOL"]
+    options=available_instruments,
+    default=["BTC", "ETH", "SOL"],
+    help=f"Choose from {len(available_instruments)} available instruments"
 )
 
 update_interval = st.sidebar.slider(
@@ -218,6 +246,14 @@ update_interval = st.sidebar.slider(
     max_value=60,
     value=15,
     step=5
+)
+
+# Order book depth selection
+orderbook_depth = st.sidebar.selectbox(
+    "Order Book Depth",
+    options=[5, 10, 15, 20],
+    index=3,  # Default to 20 levels
+    help="Number of price levels to display"
 )
 
 # Trade threshold setting
@@ -875,15 +911,15 @@ def get_market_sentiment(bids, asks):
     else:
         return "Neutral", ratio
 
-def create_seamless_orderbook(instrument, order_book_data):
-    """Create a seamless order book display similar to professional trading interfaces"""
+def create_enhanced_orderbook_display(instrument, order_book_data, depth_levels=20):
+    """Create an enhanced order book display with configurable depth and proper BBO positioning"""
     
     if 'levels' not in order_book_data or len(order_book_data['levels']) < 2:
         st.warning(f"No valid order book data for {instrument}")
         return
     
-    bids = order_book_data['levels'][0][:20]  # Top 20 bids
-    asks = order_book_data['levels'][1][:20]  # Top 20 asks
+    bids = order_book_data['levels'][0][:depth_levels]  # Top N bids
+    asks = order_book_data['levels'][1][:depth_levels]  # Top N asks
     
     if not bids or not asks:
         st.warning(f"Insufficient order book data for {instrument}")
@@ -898,154 +934,123 @@ def create_seamless_orderbook(instrument, order_book_data):
     
     # Get market sentiment
     sentiment, sentiment_ratio = get_market_sentiment(bids, asks)
-    sentiment_color = "#22c55e" if sentiment == "Bullish" else "#ef4444" if sentiment == "Bearish" else "#6b7280"
+    if sentiment == "Bullish":
+        sentiment_color = "#22c55e"
+        sentiment_sphere = "🟢"
+    elif sentiment == "Bearish":
+        sentiment_color = "#ef4444"
+        sentiment_sphere = "🔴"
+    else:
+        sentiment_color = "#6b7280"
+        sentiment_sphere = "🟡"
     
-    # Create header with key metrics
+    # Get funding rate for this instrument
+    funding_rate = 0.0
+    funding_display = "N/A"
+    if instrument in st.session_state.funding_rates:
+        funding_rate = st.session_state.funding_rates[instrument]['rate']
+        # Convert to percentage and annualize (3 funding periods per day)
+        annual_rate = funding_rate * 3 * 365 * 100
+        funding_display = f"{annual_rate:.2f}%"
+    
+    # Create ultra-slim header with key metrics
     st.markdown(f"""
     <div style='background: linear-gradient(135deg, #1f2937 0%, #374151 100%); 
-                padding: 12px 20px; border-radius: 8px; margin: 8px 0;
-                border: 1px solid #374151; box-shadow: 0 2px 4px rgba(0,0,0,0.1);'>
+                padding: 3px 12px; border-radius: 4px; margin: 2px 0;
+                border: 1px solid #374151; box-shadow: 0 1px 2px rgba(0,0,0,0.05);'>
         <div style='display: flex; justify-content: space-between; align-items: center;'>
-            <h3 style='color: #f9fafb; margin: 0; font-size: 1.3em; font-weight: 600;'>{instrument}</h3>
-            <div style='display: flex; gap: 20px; align-items: center; font-size: 0.95em;'>
-                <span style='color: #8b5cf6; font-weight: 500;'>Mid: ${mid_price:,.4f}</span>
-                <span style='color: #f59e0b; font-weight: 500;'>Spread: {spread_bps:.2f}bps</span>
-                <span style='color: {sentiment_color}; font-weight: 500;'>{sentiment} ({sentiment_ratio:.2f})</span>
+            <h5 style='color: #f9fafb; margin: 0; font-size: 0.95em; font-weight: 600;'>{instrument}</h5>
+            <div style='display: flex; gap: 8px; align-items: center; font-size: 0.7em;'>
+                <span style='color: #8b5cf6; font-weight: 500;'>${mid_price:,.4f}</span>
+                <span style='color: #f59e0b; font-weight: 500;'>{spread_bps:.2f}bps</span>
+                <span style='color: {sentiment_color}; font-weight: 500;'>{sentiment_sphere} {sentiment} ({sentiment_ratio:.2f})</span>
+                <span style='color: #10b981; font-weight: 500;'>Fund: {funding_display}</span>
+                <span style='color: #6b7280; font-weight: 400;'>({depth_levels}L)</span>
             </div>
         </div>
     </div>
     """, unsafe_allow_html=True)
     
-    # Prepare data for seamless display
-    ask_data = []
-    bid_data = []
+    # Create dataframes for asks and bids
+    ask_df = pd.DataFrame(asks)
+    ask_df['px'] = pd.to_numeric(ask_df['px'])
+    ask_df['sz'] = pd.to_numeric(ask_df['sz'])
+    ask_df['total'] = ask_df['px'] * ask_df['sz']
     
-    # Calculate cumulative volumes for depth visualization
-    ask_cumulative = 0
-    for ask in reversed(asks):  # Start from lowest ask
-        ask_cumulative += float(ask['sz'])
-        ask_data.append({
-            'price': float(ask['px']),
-            'size': float(ask['sz']),
-            'cumulative': ask_cumulative,
-            'total_value': float(ask['px']) * float(ask['sz'])
-        })
-    ask_data.reverse()  # Back to highest ask first
+    bid_df = pd.DataFrame(bids)
+    bid_df['px'] = pd.to_numeric(bid_df['px'])
+    bid_df['sz'] = pd.to_numeric(bid_df['sz'])
+    bid_df['total'] = bid_df['px'] * bid_df['sz']
     
-    bid_cumulative = 0
-    for bid in bids:  # Start from highest bid
-        bid_cumulative += float(bid['sz'])
-        bid_data.append({
-            'price': float(bid['px']),
-            'size': float(bid['sz']),
-            'cumulative': bid_cumulative,
-            'total_value': float(bid['px']) * float(bid['sz'])
-        })
+    # For asks: Create display from highest to lowest (BBO ask at bottom of table)
+    # This way when scrolled to bottom, BBO is visible
+    ask_display = ask_df.sort_values('px', ascending=False).copy()  # Highest ask first
+    ask_display.columns = ['Price', 'Size', 'Orders', 'Total']
+    ask_display = ask_display[['Price', 'Size', 'Total']]
+    ask_display.reset_index(drop=True, inplace=True)
     
-    # Get max cumulative for scaling
-    max_cumulative = max(
-        max([ask['cumulative'] for ask in ask_data]) if ask_data else 0,
-        max([bid['cumulative'] for bid in bid_data]) if bid_data else 0
+    # Add row numbers from highest level down to 0 (BBO)
+    ask_display.index = range(len(ask_display)-1, -1, -1)
+    
+    # Calculate dynamic height based on depth levels
+    table_height = min(600, max(200, depth_levels * 25 + 50))
+    
+    # Display asks table - BBO will be at bottom (row 0)
+    st.dataframe(
+        ask_display.style.background_gradient(
+            subset=['Size'], 
+            cmap='Reds', 
+            vmin=0, 
+            vmax=ask_display['Size'].max()
+        ).format({
+            'Price': '${:.4f}',
+            'Size': '{:.2f}',
+            'Total': '${:.0f}'
+        }),
+        use_container_width=True,
+        height=table_height
     )
     
-    # Create seamless order book HTML
-    orderbook_html = f"""
-    <div style='background: #111827; border-radius: 8px; overflow: hidden; 
-                border: 1px solid #374151; font-family: "SF Mono", "Monaco", "Inconsolata", "Roboto Mono", monospace;'>
-        
-        <!-- Header -->
-        <div style='background: #1f2937; padding: 8px 16px; border-bottom: 1px solid #374151;
-                    display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; 
-                    font-size: 0.8em; font-weight: 600; color: #9ca3af; text-transform: uppercase;'>
-            <div style='text-align: left;'>Price ({instrument.replace('-PERP', '') if '-' in instrument else 'USD'})</div>
-            <div style='text-align: right;'>Size</div>
-            <div style='text-align: right;'>Total</div>
-        </div>
-        
-        <!-- Asks (Sells) -->
-        <div style='background: #111827;'>
-    """
+    # For bids: Show highest bid first (BBO at top - row 0)
+    bid_display = bid_df.sort_values('px', ascending=False).copy()  # Highest bid first
+    bid_display.columns = ['Price', 'Size', 'Orders', 'Total']
+    bid_display = bid_display[['Price', 'Size', 'Total']]
+    bid_display.reset_index(drop=True, inplace=True)
     
-    # Add asks (reversed to show lowest first)
-    for i, ask in enumerate(ask_data):
-        depth_width = (ask['cumulative'] / max_cumulative * 100) if max_cumulative > 0 else 0
-        row_opacity = 0.8 - (i * 0.03)  # Fade out as we go further from spread
-        
-        orderbook_html += f"""
-            <div style='position: relative; padding: 4px 16px; border-bottom: 1px solid #1f2937;
-                        display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; 
-                        font-size: 0.85em; background: rgba(239, 68, 68, {0.05 + (depth_width/100)*0.1});'>
-                
-                <!-- Depth bar -->
-                <div style='position: absolute; right: 0; top: 0; height: 100%; 
-                            width: {depth_width}%; background: rgba(239, 68, 68, 0.15); z-index: 1;'></div>
-                
-                <!-- Content -->
-                <div style='color: #ef4444; font-weight: 600; z-index: 2; position: relative;'>${ask['price']:,.4f}</div>
-                <div style='color: #d1d5db; text-align: right; z-index: 2; position: relative;'>{ask['size']:,.2f}</div>
-                <div style='color: #9ca3af; text-align: right; font-size: 0.8em; z-index: 2; position: relative;'>${ask['total_value']:,.0f}</div>
-            </div>
-        """
+    # Display bids table - BBO at top (row 0)
+    st.dataframe(
+        bid_display.style.background_gradient(
+            subset=['Size'], 
+            cmap='Greens', 
+            vmin=0, 
+            vmax=bid_display['Size'].max()
+        ).format({
+            'Price': '${:.4f}',
+            'Size': '{:.2f}',
+            'Total': '${:.0f}'
+        }),
+        use_container_width=True,
+        height=table_height
+    )
     
-    # Add spread indicator
-    orderbook_html += f"""
-        <!-- Spread Indicator -->
-        <div style='background: linear-gradient(90deg, #ef4444 0%, #22c55e 100%); 
-                    padding: 8px 16px; text-align: center; font-weight: 600; font-size: 0.9em;
-                    color: #f9fafb; border-top: 1px solid #374151; border-bottom: 1px solid #374151;'>
-            Spread: ${spread:,.4f} ({spread_bps:.2f} bps) • Mid: ${mid_price:,.4f}
-        </div>
-    """
-    
-    # Add bids
-    for i, bid in enumerate(bid_data):
-        depth_width = (bid['cumulative'] / max_cumulative * 100) if max_cumulative > 0 else 0
-        row_opacity = 0.8 - (i * 0.03)  # Fade out as we go further from spread
-        
-        orderbook_html += f"""
-            <div style='position: relative; padding: 4px 16px; border-bottom: 1px solid #1f2937;
-                        display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; 
-                        font-size: 0.85em; background: rgba(34, 197, 94, {0.05 + (depth_width/100)*0.1});'>
-                
-                <!-- Depth bar -->
-                <div style='position: absolute; right: 0; top: 0; height: 100%; 
-                            width: {depth_width}%; background: rgba(34, 197, 94, 0.15); z-index: 1;'></div>
-                
-                <!-- Content -->
-                <div style='color: #22c55e; font-weight: 600; z-index: 2; position: relative;'>${bid['price']:,.4f}</div>
-                <div style='color: #d1d5db; text-align: right; z-index: 2; position: relative;'>{bid['size']:,.2f}</div>
-                <div style='color: #9ca3af; text-align: right; font-size: 0.8em; z-index: 2; position: relative;'>${bid['total_value']:,.0f}</div>
-            </div>
-        """
-    
-    orderbook_html += """
-        </div>
-    </div>
-    """
-    
-    # Display the seamless order book
-    st.markdown(orderbook_html, unsafe_allow_html=True)
-    
-    # Add depth chart below - using the original bar chart format
+    # Create depth chart
     fig = go.Figure()
     
     # Add asks (red bars)
-    ask_prices = [ask['price'] for ask in ask_data]
-    ask_sizes = [ask['size'] for ask in ask_data]
+    ask_chart_df = ask_df.sort_values('px', ascending=True)  # Proper order for chart
     fig.add_trace(go.Bar(
-        x=ask_prices,
-        y=ask_sizes,
+        x=ask_chart_df['px'],
+        y=ask_chart_df['sz'],
         name='Asks',
         marker_color='rgba(239, 68, 68, 0.8)',
         opacity=0.8
     ))
     
     # Add bids (green bars)
-    bid_prices = [bid['price'] for bid in bid_data]
-    bid_sizes = [bid['size'] for bid in bid_data]
+    bid_chart_df = bid_df.sort_values('px', ascending=False)
     fig.add_trace(go.Bar(
-        x=bid_prices,
-        y=bid_sizes,
+        x=bid_chart_df['px'],
+        y=bid_chart_df['sz'],
         name='Bids',
         marker_color='rgba(34, 197, 94, 0.8)',
         opacity=0.8
@@ -1060,7 +1065,7 @@ def create_seamless_orderbook(instrument, order_book_data):
     )
     
     fig.update_layout(
-        title=f"{instrument} Order Book Depth",
+        title=f"{instrument} Order Book Depth ({depth_levels} Levels)",
         xaxis_title="Price",
         yaxis_title="Size",
         barmode='group',
@@ -1112,15 +1117,15 @@ with tab1:
     
     st.text(f"Last updated: {st.session_state.last_update.strftime('%Y-%m-%d %H:%M:%S')}")
     
-    # Display order books in a more compact layout
-    for instrument in instruments:
-        if instrument in st.session_state.order_books:
-            create_seamless_orderbook(instrument, st.session_state.order_books[instrument])
-        else:
-            st.info(f"Loading order book data for {instrument}...")
-        
-        # Add some spacing between instruments
-        st.markdown("---")
+    # Create columns for side-by-side display
+    cols = st.columns(len(instruments))
+    
+    for i, instrument in enumerate(instruments):
+        with cols[i]:
+            if instrument in st.session_state.order_books:
+                create_enhanced_orderbook_display(instrument, st.session_state.order_books[instrument], orderbook_depth)
+            else:
+                st.info(f"Loading order book data for {instrument}...")
 
 # Funding Rates Tab
 with tab2:

@@ -1,5 +1,5 @@
 # Core web framework
-streamlit>=1.28.0
+streamlit>=1.37.0
 
 # HTTP client and WebSocket support
 aiohttp>=3.8.5
